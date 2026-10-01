@@ -69,11 +69,23 @@ class GlobalJoinStage:
 
         global_lib = GlobalRepresentativeLibrary()
         ssn_edges = set()
+        total = len(order)
 
-        for genome_id in order:
+        for idx, genome_id in enumerate(order, start=1):
             intra = intra_results[genome_id]
             genome = genomes[genome_id]
+            logger.info(
+                "[%d/%d] 正在处理基因组 %s (局部代表数=%d); "
+                "当前全局代表库: %d 个簇 / %d 个代表",
+                idx, total, genome_id, intra.n_representatives,
+                global_lib.n_active_clusters, global_lib.n_representatives,
+            )
             self._process_genome(genome, intra, global_lib, ssn_edges)
+            logger.info(
+                "[%d/%d] 基因组 %s 处理完成; 全局代表库更新为: %d 个簇 / %d 个代表",
+                idx, total, genome_id,
+                global_lib.n_active_clusters, global_lib.n_representatives,
+            )
             self._publish(
                 GenomeJoined(
                     timestamp=_now(),
@@ -81,6 +93,7 @@ class GlobalJoinStage:
                         "genome_id": genome_id,
                         "n_local_representatives": intra.n_representatives,
                         "n_global_clusters_so_far": global_lib.n_active_clusters,
+                        "n_global_representatives_so_far": global_lib.n_representatives,
                     },
                 )
             )
