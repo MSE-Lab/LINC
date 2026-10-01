@@ -69,9 +69,19 @@ class Cluster:
     active: bool = True   # 被合并后的旧簇标记为 False,而非物理删除(便于追溯)
 
 
-@dataclass
+@dataclass(eq=False)
 class SSNEdge:
-    """序列相似性网络(SSN)中的一条边。"""
+    """序列相似性网络(SSN)中的一条边。
+
+    SSN 在生物学语义上是无向图(A-B 相似 = B-A 相似),且补边阶段需要按
+    "基因对"去重,而 identity/coverage 是可能因重新计算产生浮点误差的派生值,
+    不应参与相等性/哈希判断。因此本类关闭 dataclass 默认生成的 __eq__,
+    改为自定义 __eq__/__hash__: 仅依据 frozenset({source, target}) 判定两条边
+    是否代表同一对基因,与字段顺序、identity/coverage 的具体数值无关。
+    这样 SSNEdge 实例既可以安全地放入 set/用作 dict key(满足
+    RepositoryPort.save_ssn_edges(edges: set) 的使用场景),又保留了
+    identity/coverage 可变、可原地更新的能力(未设为 frozen)。
+    """
 
     source: str
     target: str
@@ -89,6 +99,17 @@ class SSNEdge:
         if mode == "coverage_only":
             return self.coverage
         return self.identity * self.coverage
+
+    def _pair_key(self) -> frozenset:
+        return frozenset((self.source, self.target))
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, SSNEdge):
+            return NotImplemented
+        return self._pair_key() == other._pair_key()
+
+    def __hash__(self) -> int:
+        return hash(self._pair_key())
 
 
 @dataclass

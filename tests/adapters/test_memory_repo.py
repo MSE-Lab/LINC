@@ -1,6 +1,6 @@
 """MemoryRepository 单元测试。"""
 from linc.adapters.storage.memory_repo import MemoryRepository
-from linc.core.entities import Cluster
+from linc.core.entities import Cluster, SSNEdge
 from linc.ports.storage_port import RepositoryPort
 
 
@@ -61,3 +61,12 @@ def test_save_ssn_edges_stores_as_set():
     repo = MemoryRepository()
     repo.save_ssn_edges({("a", "b"), ("b", "c")})
     assert repo._ssn_edges == {("a", "b"), ("b", "c")}
+
+
+def test_save_ssn_edges_accepts_real_ssn_edge_instances_and_dedupes():
+    repo = MemoryRepository()
+    edge_1 = SSNEdge(source="g1|1", target="g2|1", identity=0.8, coverage=0.5)
+    # 与 edge_1 代表同一对基因(方向相反+微小浮点误差),应被去重为同一条边
+    edge_2 = SSNEdge(source="g2|1", target="g1|1", identity=0.8000001, coverage=0.5)
+    repo.save_ssn_edges({edge_1, edge_2})
+    assert len(repo._ssn_edges) == 1

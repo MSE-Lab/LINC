@@ -61,6 +61,34 @@ def test_ssn_edge_weight_modes():
     assert edge.weight() == 0.4  # 默认模式与显式指定一致
 
 
+def test_ssn_edge_is_hashable_and_usable_in_set():
+    edge = SSNEdge(source="g1|1", target="g2|1", identity=0.8, coverage=0.5)
+    # 可哈希, 可放入 set(验证 RepositoryPort.save_ssn_edges(edges: set) 场景可用)
+    assert {edge} == {edge}
+
+
+def test_ssn_edge_equality_ignores_direction():
+    forward = SSNEdge(source="g1|1", target="g2|1", identity=0.8, coverage=0.5)
+    backward = SSNEdge(source="g2|1", target="g1|1", identity=0.8, coverage=0.5)
+    assert forward == backward
+    assert hash(forward) == hash(backward)
+
+
+def test_ssn_edge_equality_ignores_identity_coverage_float_noise():
+    edge_a = SSNEdge(source="g1|1", target="g2|1", identity=0.8, coverage=0.5)
+    edge_b = SSNEdge(source="g1|1", target="g2|1", identity=0.8000001, coverage=0.5)
+    # 同一对基因, 即使 identity/coverage 因重新计算产生微小浮点误差, 仍视为同一条边
+    assert edge_a == edge_b
+    # 放入 set 后应去重为一条边(验证补边阶段"按基因对去重"的业务语义)
+    assert len({edge_a, edge_b}) == 1
+
+
+def test_ssn_edge_not_equal_to_different_gene_pair():
+    edge_1 = SSNEdge(source="g1|1", target="g2|1", identity=0.8, coverage=0.5)
+    edge_2 = SSNEdge(source="g1|1", target="g3|1", identity=0.8, coverage=0.5)
+    assert edge_1 != edge_2
+
+
 def test_ortholog_family_size_property():
     family = OrthologFamily(
         family_id="fam1",
