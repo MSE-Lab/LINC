@@ -1,0 +1,138 @@
+"""MMseqsAligner 单元测试。
+
+通过 monkeypatch 替换 shutil.which/subprocess.run, 不依赖真实安装的 mmseqs2
+二进制程序, 可在任意环境下运行(包括未安装 mmseqs 的 CI)。
+"""
+import subprocess
+
+import pytest
+
+from linc.adapters.aligners.mmseqs_adapter import MMseqsAligner, MMseqsConfig
+from linc.core.entities import Gene
+from linc.ports.aligner_port import AlignerPort
+
+
+def _gene(gene_id: str, length: int) -> Gene:
+    return Gene(gene_id=gene_id, genome_id="g1", length=length, sequence="M" * length)
+
+
+def test_missing_binary_raises_clear_error(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    with pytest.raises(RuntimeError, match="未找到 mmseqs"):
+        MMseqsAligner()
+
+
+def test_satisfies_aligner_port(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
+    assert isinstance(MMseqsAligner(), AlignerPort)
+
+
+def _fake_run_factory(tsv_lines):
+    """构造一个假的 subprocess.run, 把预设的 tsv 内容写入结果文件。"""
+
+    def _fake_run(cmd, check, capture_output, text):
+        result_tsv = cmd[4]  # easy-search 的第5个位置参数是结果文件路径
+        with open(result_tsv, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(tsv_lines))
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    return _fake_run
+
+
+def test_align_all_vs_all_parses_result_and_filters_self_hit(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
+    tsv_lines = [
+        "g1|1\tg1|1\t100.0\t1.0\t1.0\t0.0\t200.0\t100",  # 自身比对, 应被过滤
+        "g1|1\tg1|2\t85.5\t0.9\t0.95\t1e-30\t150.0\t90",
+    ]
+    monkeypatch.setattr(subprocess, "run", _fake_run_factory(tsv_lines))
+
+    aligner = MMseqsAligner()
+    genes = [_gene("g1|1", 100), _gene("g1|2", 100)]
+    results = aligner.align_all_vs_all(genes)
+
+    assert len(results) == 1
+    [result] = results
+    assert result.query_id == "g1|1"
+    assert result.subject_id == "g1|2"
+    assert result.identity == pytest.approx(0.855)
+    assert result.query_cover == pytest.approx(0.9)
+    assert result.subject_cover == pytest.approx(0.95)
+    assert result.coverage == pytest.approx(0.9)
+    assert result.evalue == pytest.approx(1e-30)
+    assert result.bitscore == pytest.approx(150.0)
+    assert result.alignment_length == 90
+
+
+def test_align_query_vs_subject_uses_separate_fasta(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
+    tsv_lines = ["q1\ts1\t50.0\t0.5\t0.5\t1e-5\t20.0\t10"]
+    monkeypatch.setattr(subprocess, "run", _fake_run_factory(tsv_lines))
+
+    aligner = MMseqsAligner()
+    query = [_gene("q1", 10)]
+    subject = [_gene("s1", 20)]
+    results = aligner.align_query_vs_subject(query, subject)
+
+    assert len(results) == 1
+    assert results[0].identity == pytest.approx(0.5)
+
+
+def test_empty_query_or_subject_returns_empty_without_calling_subprocess(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
+
+    def _should_not_be_called(*args, **kwargs):
+        raise AssertionError("subprocess.run 不应被调用")
+
+    monkeypatch.setattr(subprocess, "run", _should_not_be_called)
+
+    aligner = MMseqsAligner()
+    assert aligner.align_all_vs_all([]) == []
+    assert aligner.align_query_vs_subject([_gene("q1", 10)], []) == []
+
+
+def test_malformed_output_line_is_skipped(monkeypatch, caplog):
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
+    tsv_lines = ["g1|1\tg1|2\t85.5\t0.9\t0.95\t1e-30\t150.0"]  # 缺一列
+    monkeypatch.setattr(subprocess, "run", _fake_run_factory(tsv_lines))
+
+    aligner = MMseqsAligner()
+    results = aligner.align_all_vs_all([_gene("g1|1", 100), _gene("g1|2", 100)])
+    assert results == []
+
+
+def test_subprocess_failure_raises_runtime_error(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
+
+    def _fake_run_fail(cmd, check, capture_output, text):
+        raise subprocess.CalledProcessError(
+            returncode=1, cmd=cmd, stderr="mmseqs: command failed"
+        )
+
+    monkeypatch.setattr(subprocess, "run", _fake_run_fail)
+
+    aligner = MMseqsAligner()
+    with pytest.raises(RuntimeError, match="mmseqs easy-search 执行失败"):
+        aligner.align_all_vs_all([_gene("g1|1", 100), _gene("g1|2", 100)])
+
+
+def test_custom_config_values_are_used_in_command(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
+    captured_cmd = {}
+
+    def _fake_run(cmd, check, capture_output, text):
+        captured_cmd["cmd"] = cmd
+        result_tsv = cmd[4]
+        with open(result_tsv, "w", encoding="utf-8") as fh:
+            fh.write("")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    aligner = MMseqsAligner(MMseqsConfig(sensitivity=6.0, evalue=1e-10, threads=4))
+    aligner.align_all_vs_all([_gene("g1|1", 100), _gene("g1|2", 100)])
+
+    cmd = captured_cmd["cmd"]
+    assert "6.0" in cmd
+    assert "1e-10" in cmd
+    assert "4" in cmd

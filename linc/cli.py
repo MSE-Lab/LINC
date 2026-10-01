@@ -1,8 +1,13 @@
 """LINC 命令行入口。
 
-当前阶段(第4步 engine 层开发中)仅接通 GenomeLoadStage,后续每接通一个新
-Stage,直接在 `run` 命令内部继续往后扩展流水线调用,CLI 接口形态本身
-(`linc run -i <目录> -o <输出目录>`)不再变动。
+当前阶段(第4步 engine 层开发中)已接通 GenomeLoadStage + IntraGenomeStage,
+后续每接通一个新 Stage,直接在 `run` 命令内部继续往后扩展流水线调用,
+CLI 接口形态本身(`linc run -i <目录> -o <输出目录>`)不再变动。
+
+IntraGenomeStage 的比对后端可通过 `--backend` 选择:
+- "mock"(默认, 用于单测/无 mmseqs 环境下打通流程): MockAligner 的长度相似度模式。
+- "mmseqs": 调用系统级 mmseqs2(需要已安装并在 PATH 中, 推荐通过 conda `linc`
+  环境提供), 使用真实序列比对结果。
 """
 import json
 import logging
@@ -10,8 +15,12 @@ import os
 import sys
 import typer
 
+from .adapters.aligners.mock_adapter import MockAligner
+from .adapters.aligners.mmseqs_adapter import MMseqsAligner
+from .adapters.clustering.union_find_adapter import UnionFindClustering
 from .core.entities import GenomeStatus
 from .engine.genome_load_stage import GenomeLoadStage, discover_fasta_files
+from .engine.intra_genome_stage import IntraGenomeStage
 
 app = typer.Typer(help="LINC: 增量基因组比较构建 SSN 并通过 MCL 细分蛋白质家族。")
 
@@ -53,6 +62,31 @@ def _build_load_summary(genomes: dict) -> dict:
     }
 
 
+def _build_intra_summary(intra_results: dict) -> dict:
+    total_genes = sum(r.n_genes for r in intra_results.values())
+    total_representatives = sum(r.n_representatives for r in intra_results.values())
+    compression_ratio = (
+        total_representatives / total_genes if total_genes > 0 else 0.0
+    )
+    return {
+        "total_genes": total_genes,
+        "total_representatives": total_representatives,
+        "compression_ratio": round(compression_ratio, 4),
+        "genomes": {
+            genome_id: {
+                "n_genes": r.n_genes,
+                "n_clusters": r.n_clusters,
+                "n_representatives": r.n_representatives,
+                "n_orphans": len(r.orphan_genes),
+                "compression_ratio": round(
+                    r.n_representatives / r.n_genes, 4
+                ) if r.n_genes > 0 else 0.0,
+            }
+            for genome_id, r in intra_results.items()
+        },
+    }
+
+
 @app.command()
 def run(
     input_dir: str = typer.Option(
@@ -61,9 +95,21 @@ def run(
     output_dir: str = typer.Option(
         "output", "-o", "--output-dir", help="输出目录,用于写入运行摘要等结果文件。"
     ),
+    cutoff_i: float = typer.Option(
+        0.5, "--cutoff-i", help="Cutoff-I(纳入阈值): 判定是否成簇。"
+    ),
+    cutoff_ii: float = typer.Option(
+        0.8, "--cutoff-ii", help="Cutoff-II(高置信阈值): 判定代表选取策略。"
+    ),
+    max_per_cluster: int = typer.Option(
+        5, "--max-per-cluster", help="单个局部簇最多选取的代表数。"
+    ),
+    backend: str = typer.Option(
+        "mock", "--backend", help="比对引擎后端: mock(默认, 无需安装 mmseqs) | mmseqs(真实比对, 需已安装 mmseqs2)。"
+    ),
     verbose: bool = typer.Option(False, "--verbose", help="输出 DEBUG 级别日志。"),
 ) -> None:
-    """运行 LINC 流水线(当前阶段仅接通 GenomeLoadStage)。"""
+    """运行 LINC 流水线(当前阶段已接通 GenomeLoadStage + IntraGenomeStage)。"""
     _setup_logging(verbose)
 
     if not os.path.isdir(input_dir):
@@ -98,6 +144,48 @@ def run(
             fg=typer.colors.YELLOW,
         )
     typer.echo(f"摘要已写入: {summary_path}")
+
+    loaded_genomes = {
+        genome_id: genome
+        for genome_id, genome in genomes.items()
+        if genome.status == GenomeStatus.LOADED
+    }
+    if backend == "mmseqs":
+        aligner = MMseqsAligner()
+    elif backend == "mock":
+        aligner = MockAligner()
+    else:
+        typer.secho(
+            f"未知的 --backend 取值: {backend}(可选: mock | mmseqs)",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    logger.info("比对后端: %s", backend)
+    intra_stage = IntraGenomeStage(
+        aligner=aligner,
+        clustering=UnionFindClustering(),
+        cutoff_i=cutoff_i,
+        cutoff_ii=cutoff_ii,
+        max_per_cluster=max_per_cluster,
+    )
+    logger.info("开始基因组内自聚类(IntraGenomeStage), 共 %d 个基因组", len(loaded_genomes))
+    intra_results = {
+        genome_id: intra_stage.run(genome)
+        for genome_id, genome in loaded_genomes.items()
+    }
+
+    intra_summary = _build_intra_summary(intra_results)
+    intra_summary_path = os.path.join(output_dir, "intra_summary.json")
+    with open(intra_summary_path, "w", encoding="utf-8") as fh:
+        json.dump(intra_summary, fh, ensure_ascii=False, indent=2)
+
+    typer.echo(
+        f"基因组内自聚类完成: 共 {intra_summary['total_genes']} 个基因, "
+        f"压缩为 {intra_summary['total_representatives']} 个代表 "
+        f"(压缩率 {intra_summary['compression_ratio']:.2%})"
+    )
+    typer.echo(f"摘要已写入: {intra_summary_path}")
 
 
 if __name__ == "__main__":

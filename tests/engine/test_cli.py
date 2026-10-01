@@ -82,3 +82,50 @@ def test_run_empty_input_dir_still_succeeds_with_zero_genomes(tmp_path):
     assert result.exit_code == 0
     summary = json.loads((output_dir / "load_summary.json").read_text(encoding="utf-8"))
     assert summary["total_genomes"] == 0
+
+
+def test_run_writes_intra_summary_for_loaded_genomes(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    # g1/g2 序列长度相同 -> MockAligner 默认模式下 identity=1.0, 会被聚为同一簇;
+    # g3 长度差异很大 -> 与 g1/g2 不成簇, 为孤儿基因。
+    _write_fasta(
+        str(input_dir / "genome01.faa"),
+        [("g1", "MKV"), ("g2", "MKL"), ("g3", "MKVLAQWERTYUIOPASDFGH")],
+    )
+
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(
+        app, ["run", "-i", str(input_dir), "-o", str(output_dir)]
+    )
+
+    assert result.exit_code == 0
+    assert "基因组内自聚类完成" in result.stdout
+
+    intra_summary_path = output_dir / "intra_summary.json"
+    assert intra_summary_path.exists()
+    intra_summary = json.loads(intra_summary_path.read_text(encoding="utf-8"))
+    assert intra_summary["total_genes"] == 3
+    genome_summary = intra_summary["genomes"]["genome01"]
+    assert genome_summary["n_genes"] == 3
+    assert genome_summary["n_orphans"] >= 1
+
+
+def test_run_intra_summary_skipped_for_failed_genomes(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    (input_dir / "empty.faa").write_text("", encoding="utf-8")
+
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(
+        app, ["run", "-i", str(input_dir), "-o", str(output_dir)]
+    )
+
+    assert result.exit_code == 0
+    intra_summary = json.loads(
+        (output_dir / "intra_summary.json").read_text(encoding="utf-8")
+    )
+    assert intra_summary["total_genes"] == 0
+    assert "empty" not in intra_summary["genomes"]
