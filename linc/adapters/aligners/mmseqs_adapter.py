@@ -89,13 +89,15 @@ class MMseqsAligner:
                 str(self._config.sensitivity),
                 "-e",
                 str(self._config.evalue),
-                "--threads",
-                str(self._config.threads),
                 "--format-output",
                 _FORMAT_OUTPUT,
                 "-v",
                 "1",
             ]
+            if self._config.threads > 0:
+                # mmseqs 要求 --threads >= 1, 0 表示"不显式指定",
+                # 让 mmseqs 使用其自身默认的全部核心数。
+                cmd += ["--threads", str(self._config.threads)]
             logger.debug("调用 mmseqs: %s", " ".join(cmd))
             try:
                 subprocess.run(

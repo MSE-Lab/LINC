@@ -135,4 +135,26 @@ def test_custom_config_values_are_used_in_command(monkeypatch):
     cmd = captured_cmd["cmd"]
     assert "6.0" in cmd
     assert "1e-10" in cmd
+    assert "--threads" in cmd
     assert "4" in cmd
+
+
+def test_default_threads_zero_omits_threads_flag(monkeypatch):
+    """threads<=0(默认)时不应传递 --threads, 避免 mmseqs 报 "Error in argument --threads"。"""
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
+    captured_cmd = {}
+
+    def _fake_run(cmd, check, capture_output, text):
+        captured_cmd["cmd"] = cmd
+        result_tsv = cmd[4]
+        with open(result_tsv, "w", encoding="utf-8") as fh:
+            fh.write("")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    aligner = MMseqsAligner()  # 默认 MMseqsConfig(threads=0)
+    aligner.align_all_vs_all([_gene("g1|1", 100), _gene("g1|2", 100)])
+
+    cmd = captured_cmd["cmd"]
+    assert "--threads" not in cmd
