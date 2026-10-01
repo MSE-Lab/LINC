@@ -1,10 +1,12 @@
 """LINC 命令行入口。
 
-当前阶段(第4步 engine 层开发中)已接通 GenomeLoadStage + IntraGenomeStage,
-后续每接通一个新 Stage,直接在 `run` 命令内部继续往后扩展流水线调用,
-CLI 接口形态本身(`linc run -i <目录> -o <输出目录>`)不再变动。
+当前阶段(第4步 engine 层开发中)已接通 GenomeLoadStage + IntraGenomeStage +
+GlobalJoinStage,后续每接通一个新 Stage,直接在 `run` 命令内部继续往后扩展
+流水线调用,CLI 接口形态本身(`linc run -i <目录> -o <输出目录>`)不再变动。
 
-IntraGenomeStage 的比对后端可通过 `--backend` 选择:
+IntraGenomeStage/GlobalJoinStage 的比对后端可通过 `--backend` 选择(二者共用
+同一个 aligner 实例, 以便 GlobalJoinStage 复用 IntraGenomeStage 阶段已建好的
+持久化索引, 避免重复建库):
 - "mock"(默认, 用于单测/无 mmseqs 环境下打通流程): MockAligner 的长度相似度模式。
 - "mmseqs": 调用系统级 mmseqs2(需要已安装并在 PATH 中, 推荐通过 conda `linc`
   环境提供), 使用真实序列比对结果。
@@ -20,6 +22,7 @@ from .adapters.aligners.mmseqs_adapter import MMseqsAligner
 from .adapters.clustering.union_find_adapter import UnionFindClustering
 from .core.entities import GenomeStatus
 from .engine.genome_load_stage import GenomeLoadStage, discover_fasta_files
+from .engine.global_join_stage import GlobalJoinStage
 from .engine.intra_genome_stage import IntraGenomeStage
 
 app = typer.Typer(help="LINC: 增量基因组比较构建 SSN 并通过 MCL 细分蛋白质家族。")
@@ -59,6 +62,24 @@ def _build_load_summary(genomes: dict) -> dict:
             }
             for genome_id, genome in genomes.items()
         },
+    }
+
+
+def _build_join_summary(result) -> dict:
+    return {
+        "processing_order": result.processing_order,
+        "n_clusters_final": result.n_clusters_final,
+        "n_representatives_final": result.n_representatives_final,
+        "n_ssn_edges": len(result.ssn_edges),
+        "clusters": [
+            {
+                "cluster_id": cluster.cluster_id,
+                "n_representatives": len(cluster.representative_ids),
+                "n_members": len(cluster.member_ids),
+            }
+            for cluster in result.global_lib.clusters
+            if cluster.active
+        ],
     }
 
 
@@ -109,7 +130,7 @@ def run(
     ),
     verbose: bool = typer.Option(False, "--verbose", help="输出 DEBUG 级别日志。"),
 ) -> None:
-    """运行 LINC 流水线(当前阶段已接通 GenomeLoadStage + IntraGenomeStage)。"""
+    """运行 LINC 流水线(当前阶段已接通 GenomeLoadStage + IntraGenomeStage + GlobalJoinStage)。"""
     _setup_logging(verbose)
 
     if not os.path.isdir(input_dir):
@@ -186,6 +207,27 @@ def run(
         f"(压缩率 {intra_summary['compression_ratio']:.2%})"
     )
     typer.echo(f"摘要已写入: {intra_summary_path}")
+
+    join_stage = GlobalJoinStage(
+        aligner=aligner,
+        cutoff_i=cutoff_i,
+        cutoff_ii=cutoff_ii,
+        max_per_cluster=max_per_cluster,
+    )
+    logger.info("开始增量并入全局代表库(GlobalJoinStage), 共 %d 个基因组", len(loaded_genomes))
+    join_result = join_stage.run(loaded_genomes, intra_results)
+
+    join_summary = _build_join_summary(join_result)
+    join_summary_path = os.path.join(output_dir, "join_summary.json")
+    with open(join_summary_path, "w", encoding="utf-8") as fh:
+        json.dump(join_summary, fh, ensure_ascii=False, indent=2)
+
+    typer.echo(
+        f"增量并入全局代表库完成: 最终 {join_summary['n_clusters_final']} 个簇, "
+        f"{join_summary['n_representatives_final']} 个全局代表, "
+        f"{join_summary['n_ssn_edges']} 条 SSN 边"
+    )
+    typer.echo(f"摘要已写入: {join_summary_path}")
 
 
 if __name__ == "__main__":

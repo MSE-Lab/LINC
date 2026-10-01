@@ -129,3 +129,47 @@ def test_run_intra_summary_skipped_for_failed_genomes(tmp_path):
     )
     assert intra_summary["total_genes"] == 0
     assert "empty" not in intra_summary["genomes"]
+
+
+def test_run_writes_join_summary_across_genomes(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV"), ("g2", "MKL")])
+    _write_fasta(str(input_dir / "genome02.faa"), [("g3", "MKV")])
+
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(
+        app, ["run", "-i", str(input_dir), "-o", str(output_dir)]
+    )
+
+    assert result.exit_code == 0
+    assert "增量并入全局代表库完成" in result.stdout
+
+    join_summary_path = output_dir / "join_summary.json"
+    assert join_summary_path.exists()
+    join_summary = json.loads(join_summary_path.read_text(encoding="utf-8"))
+    assert set(join_summary["processing_order"]) == {"genome01", "genome02"}
+    assert join_summary["n_clusters_final"] >= 1
+    assert join_summary["n_representatives_final"] >= 1
+    assert isinstance(join_summary["clusters"], list)
+
+
+def test_run_join_summary_empty_when_no_genomes_loaded(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    (input_dir / "empty.faa").write_text("", encoding="utf-8")
+
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(
+        app, ["run", "-i", str(input_dir), "-o", str(output_dir)]
+    )
+
+    assert result.exit_code == 0
+    join_summary = json.loads(
+        (output_dir / "join_summary.json").read_text(encoding="utf-8")
+    )
+    assert join_summary["processing_order"] == []
+    assert join_summary["n_clusters_final"] == 0
+    assert join_summary["n_representatives_final"] == 0
