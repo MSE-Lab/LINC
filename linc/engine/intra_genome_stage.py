@@ -67,12 +67,18 @@ class IntraGenomeStage:
         if n_genes == 0:
             return GenomeIntraResult(genome_id=genome.genome_id)
 
-        hits = self._aligner.align_all_vs_all(genes)
+        # build_index 持久化建库(与用户确认,2026-10-01):建一次索引, 后续
+        # GlobalJoinStage 反过来用全局库 query 该索引, 复用而不重新建库
+        # (详见 docs/LINC_技术框架设计_v2.md 第2.4节"GlobalJoinStage 性能方案")。
+        genome_index = self._aligner.build_index(genes, index_id=genome.genome_id)
+        hits = self._aligner.search(genes, genome_index)
 
         identity_map: _IdentityMap = {}
         graph = nx.Graph()
         graph.add_nodes_from(gene.gene_id for gene in genes)
         for hit in hits:
+            if hit.query_id == hit.subject_id:
+                continue   # 自身比对(all-vs-all 场景下 query/target 来自同一份序列集合)
             identity_map[(hit.query_id, hit.subject_id)] = hit.identity
             identity_map[(hit.subject_id, hit.query_id)] = hit.identity
             if hit.identity >= self._cutoff_i:
@@ -127,6 +133,7 @@ class IntraGenomeStage:
             n_genes=n_genes,
             n_clusters=len(local_clusters),
             n_representatives=len(local_representatives),
+            genome_index=genome_index,
         )
         logger.info(
             "IntraGenomeStage 完成: genome_id=%s n_genes=%d n_clusters=%d "

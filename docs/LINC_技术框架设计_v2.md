@@ -325,6 +325,36 @@ class IncrementalSSNEngine:
 > 为贪心覆盖(k-center 近似)算法。该项算法以 `linc/engine/intra_genome_stage.py` 的实现
 > 及其 docstring 为准,归档文档此处内容已过时。
 
+#### `GlobalJoinStage` 性能方案(与用户讨论确认,2026-10-01)
+
+**问题背景**: `AlignerPort` 的 mmseqs 实现每次调用都对 subject 重新 `createdb`+建索引
+(无状态、无缓存)。若严格按 STEP3 文档字面"逐个局部代表单独与全局库比对"的粒度实现,
+全局库(作为 subject)会在整个 Stage 运行期间从 0 增长到上千条,每次都重建索引的开销
+是 O(总局部代表数 × 平均库规模),可能成为实际性能瓶颈。
+
+**最终方案(三轮讨论确认)**:
+
+1. **query/target 方向反转**: `IntraGenomeStage` 的 all-vs-all 本质是"基因组整体(query)
+   vs 该基因组自己的 DB(target)"。类比过来,`GlobalJoinStage` 应该是"全局代表库整体
+   (query) vs 新进来的基因组 DB(target)"——**复用 `IntraGenomeStage` 阶段已经建好的
+   基因组索引**,避免 target 侧重复建库(这是最贵的部分)。
+2. **`AlignerPort` 统一为 build_index(建库) + search(查询) 两步原语**,`IntraGenomeStage`
+   / `GlobalJoinStage` 均遵循同一操作模式:先 `build_index` 得到可复用的索引 handle,
+   再用该 handle 反复 `search`。`IntraGenomeStage.run()` 为基因组建一次索引,存入
+   `GenomeIntraResult.genome_index`,供 `GlobalJoinStage` 直接取用,不重新建库。
+3. **持久化工作目录**: 运行期间维护一个不自动清理的工作目录(如 `output/.linc_work/`)
+   保存所有基因组的 mmseqs DB 文件,贴合 LINC 本身的断点续跑/增量添加数据的定位,
+   避免过程文件被提前清理导致无法复用。
+4. **`GlobalJoinStage` 批处理粒度**: 按 Order-D 顺序逐个基因组处理;对每个基因组,
+   用当前全局代表库整体作为 query,对该基因组持久化的索引做**一次**比对,
+   从结果中只取"局部代表"对应的行,按确定顺序(字典序)逐个走双阈值决策树并串行应用决策。
+   **正确性论证**: `IntraGenomeStage` 的 `multi_representative_clustering` 本身是贪心
+   覆盖算法,保证同一基因组内所有被选出的局部代表彼此 pairwise identity 必然 < Cutoff-II,
+   因此"基因组级批处理快照"不会引入同基因组内本应共享代表却被误判为各自新建簇的问题,
+   与"严格逐代表单独 query"正确性等价,但比对调用次数降至 O(基因组数)。
+
+该方案已在 `开发进度.md` 变更日志中记录,是 `GlobalJoinStage` 实现的既定设计依据。
+
 ---
 
 ### 2.5 `pipeline.py` — 声明式 Pipeline + Checkpoint/Resume

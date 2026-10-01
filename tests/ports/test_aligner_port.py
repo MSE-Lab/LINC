@@ -46,6 +46,12 @@ class FakeAligner:
             for s in subject
         ]
 
+    def build_index(self, genes: Sequence[Gene], index_id=None):
+        return list(genes)
+
+    def search(self, query: Sequence[Gene], index) -> List[AlignmentResult]:
+        return self.align_query_vs_subject(query, index)
+
 
 def _make_genes() -> List[Gene]:
     return [

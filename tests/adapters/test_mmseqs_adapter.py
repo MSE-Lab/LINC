@@ -12,6 +12,10 @@ from linc.core.entities import Gene
 from linc.ports.aligner_port import AlignerPort
 
 
+def _tmp_work_dir(tmp_path):
+    return str(tmp_path / "linc_work")
+
+
 def _gene(gene_id: str, length: int) -> Gene:
     return Gene(gene_id=gene_id, genome_id="g1", length=length, sequence="M" * length)
 
@@ -158,3 +162,72 @@ def test_default_threads_zero_omits_threads_flag(monkeypatch):
 
     cmd = captured_cmd["cmd"]
     assert "--threads" not in cmd
+
+
+def test_build_index_runs_createdb_and_returns_persistent_db_path(monkeypatch, tmp_path):
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
+    captured = {}
+
+    def _fake_run(cmd, check, capture_output, text):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    aligner = MMseqsAligner(MMseqsConfig(work_dir=_tmp_work_dir(tmp_path)))
+    index = aligner.build_index([_gene("g1|1", 100)], index_id="genome_x")
+
+    assert "createdb" in captured["cmd"]
+    assert index is not None
+    assert "genome_x" in index
+
+
+def test_build_index_empty_genes_returns_none_without_calling_subprocess(monkeypatch, tmp_path):
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
+
+    def _should_not_be_called(*args, **kwargs):
+        raise AssertionError("subprocess.run 不应被调用")
+
+    monkeypatch.setattr(subprocess, "run", _should_not_be_called)
+
+    aligner = MMseqsAligner(MMseqsConfig(work_dir=_tmp_work_dir(tmp_path)))
+    assert aligner.build_index([]) is None
+
+
+def test_search_runs_createdb_search_convertalis_against_persisted_index(monkeypatch, tmp_path):
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
+    calls = []
+
+    def _fake_run(cmd, check, capture_output, text):
+        calls.append(cmd)
+        if cmd[1] == "convertalis":
+            result_tsv = cmd[5]
+            with open(result_tsv, "w", encoding="utf-8") as fh:
+                fh.write("q1\ts1\t80.0\t0.8\t0.8\t1e-10\t100.0\t50")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    aligner = MMseqsAligner(MMseqsConfig(work_dir=_tmp_work_dir(tmp_path)))
+    results = aligner.search([_gene("q1", 10)], "/fake/persisted/db")
+
+    sub_commands = [c[1] for c in calls]
+    assert sub_commands == ["createdb", "search", "convertalis"]
+    # search/convertalis 都应直接使用传入的持久化 index 路径作为 target, 不重新 createdb
+    assert calls[1][3] == "/fake/persisted/db"
+    assert calls[2][3] == "/fake/persisted/db"
+    assert len(results) == 1
+    assert results[0].identity == pytest.approx(0.8)
+
+
+def test_search_empty_query_or_index_returns_empty_without_calling_subprocess(monkeypatch, tmp_path):
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
+
+    def _should_not_be_called(*args, **kwargs):
+        raise AssertionError("subprocess.run 不应被调用")
+
+    monkeypatch.setattr(subprocess, "run", _should_not_be_called)
+
+    aligner = MMseqsAligner(MMseqsConfig(work_dir=_tmp_work_dir(tmp_path)))
+    assert aligner.search([], "/fake/db") == []
+    assert aligner.search([_gene("q1", 10)], None) == []

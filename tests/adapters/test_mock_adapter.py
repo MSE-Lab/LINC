@@ -79,3 +79,29 @@ def test_align_query_vs_subject_full_cartesian_product():
     subject = [_gene("s1", 10), _gene("s2", 20), _gene("s3", 30)]
     results = aligner.align_query_vs_subject(query, subject)
     assert len(results) == 6
+
+
+def test_build_index_returns_gene_list_as_handle():
+    aligner = MockAligner()
+    genes = [_gene("g1|1", 100), _gene("g1|2", 200)]
+    index = aligner.build_index(genes)
+    assert list(index) == genes
+
+
+def test_search_uses_index_as_target_full_cartesian_product():
+    aligner = MockAligner()
+    query = [_gene("q1", 10), _gene("q2", 20)]
+    index = aligner.build_index([_gene("s1", 10), _gene("s2", 20), _gene("s3", 30)])
+    results = aligner.search(query, index)
+    assert len(results) == 6
+
+
+def test_search_result_matches_align_query_vs_subject():
+    """search(query, build_index(subject)) 应与 align_query_vs_subject(query, subject) 等价。"""
+    aligner = MockAligner()
+    query = [_gene("q1", 10)]
+    subject = [_gene("s1", 15)]
+    index = aligner.build_index(subject)
+    via_search = aligner.search(query, index)
+    via_direct = aligner.align_query_vs_subject(query, subject)
+    assert via_search[0].identity == via_direct[0].identity

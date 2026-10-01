@@ -6,7 +6,7 @@ property(派生字段如 coverage/size)等现代 dataclass 写法。
 """
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 
 class GenomeStatus(str, Enum):
@@ -140,6 +140,119 @@ class GenomeIntraResult:
     n_genes: int = 0
     n_clusters: int = 0
     n_representatives: int = 0
+    genome_index: Any = None   # AlignerPort.build_index 返回的持久化索引 handle,
+                                 # 供 GlobalJoinStage 复用, 避免重复建库(见 v2 设计文档 2.4节)
+
+
+@dataclass
+class GlobalRepresentativeLibrary:
+    """全局代表库(Step3 增量并入阶段持有/更新的核心状态)。
+
+    持有全局 Cluster 列表 + "代表基因 -> 簇" 的映射(仅代表基因参与映射,
+    普通成员基因不在此追踪, 其归属关系体现在 Cluster.member_ids 里)。
+    簇合并时旧簇标记 active=False 而非物理删除(复用 Cluster.active 字段,
+    便于追溯, 与 IntraGenomeStage 的既有设计风格保持一致)。
+    """
+
+    clusters: List[Cluster] = field(default_factory=list)
+    gene_to_cluster: Dict[str, str] = field(default_factory=dict)  # 代表基因id -> cluster_id
+    _genes_by_id: Dict[str, "Gene"] = field(default_factory=dict, repr=False)
+
+    def get_cluster(self, cluster_id: str) -> Optional[Cluster]:
+        for cluster in self.clusters:
+            if cluster.cluster_id == cluster_id:
+                return cluster
+        return None
+
+    def representative_genes(self) -> List["Gene"]:
+        """返回当前所有存活簇的代表基因列表(作为下一次 query 使用)。"""
+        reps: List["Gene"] = []
+        for cluster in self.clusters:
+            if not cluster.active:
+                continue
+            for rep_id in cluster.representative_ids:
+                gene = self._genes_by_id.get(rep_id)
+                if gene is not None:
+                    reps.append(gene)
+        return reps
+
+    def add_new_cluster(self, cluster_id: str, gene: "Gene") -> None:
+        """命中 0 个簇: 以该代表为初始代表创建新簇。"""
+        self._genes_by_id[gene.gene_id] = gene
+        cluster = Cluster(
+            cluster_id=cluster_id,
+            representative_ids={gene.gene_id},
+            member_ids={gene.gene_id},
+        )
+        self.clusters.append(cluster)
+        self.gene_to_cluster[gene.gene_id] = cluster_id
+
+    def add_representative(self, cluster_id: str, gene: "Gene") -> None:
+        """命中 1 个簇、仅达 Cutoff-I: 增补为该簇的新代表。"""
+        self._genes_by_id[gene.gene_id] = gene
+        cluster = self.get_cluster(cluster_id)
+        cluster.representative_ids.add(gene.gene_id)
+        cluster.member_ids.add(gene.gene_id)
+        self.gene_to_cluster[gene.gene_id] = cluster_id
+
+    def add_member_only(self, cluster_id: str, gene: "Gene") -> None:
+        """命中 1 个簇、达到 Cutoff-II: 沿用已有代表, 仅记录成员, 不新增代表。"""
+        cluster = self.get_cluster(cluster_id)
+        cluster.member_ids.add(gene.gene_id)
+
+    def merge_clusters(
+        self,
+        cluster_ids: List[str],
+        merged_id: str,
+        new_representative: Optional["Gene"] = None,
+    ) -> Cluster:
+        """合并多个簇为一个新簇(旧簇标记 active=False, 不物理删除)。
+
+        new_representative: 路径③"均仅达 Cutoff-I"时, 连接远缘家族的该代表
+        本身也需要新增为合并后簇的代表, 一并传入即可。
+        """
+        representative_ids: Set[str] = set()
+        member_ids: Set[str] = set()
+        for cid in cluster_ids:
+            cluster = self.get_cluster(cid)
+            if cluster is None or not cluster.active:
+                continue
+            cluster.active = False
+            representative_ids |= cluster.representative_ids
+            member_ids |= cluster.member_ids
+            for rep_id in cluster.representative_ids:
+                self.gene_to_cluster[rep_id] = merged_id
+        if new_representative is not None:
+            self._genes_by_id[new_representative.gene_id] = new_representative
+            representative_ids.add(new_representative.gene_id)
+            member_ids.add(new_representative.gene_id)
+            self.gene_to_cluster[new_representative.gene_id] = merged_id
+        merged = Cluster(
+            cluster_id=merged_id,
+            representative_ids=representative_ids,
+            member_ids=member_ids,
+        )
+        self.clusters.append(merged)
+        return merged
+
+    @property
+    def n_active_clusters(self) -> int:
+        return sum(1 for c in self.clusters if c.active)
+
+    @property
+    def n_representatives(self) -> int:
+        return sum(len(c.representative_ids) for c in self.clusters if c.active)
+
+
+@dataclass
+class IncrementalResult:
+    """Step3(增量并入全局代表库)的最终输出。"""
+
+    global_lib: GlobalRepresentativeLibrary = field(default_factory=GlobalRepresentativeLibrary)
+    ssn_edges: Set["SSNEdge"] = field(default_factory=set)
+    processing_order: List[str] = field(default_factory=list)
+    n_clusters_final: int = 0
+    n_representatives_final: int = 0
 
 
 @dataclass

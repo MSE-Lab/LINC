@@ -18,8 +18,9 @@ import os
 import shutil
 import subprocess
 import tempfile
+import uuid
 from dataclasses import dataclass
-from typing import List, Sequence
+from typing import Any, List, Optional, Sequence
 
 from ...core.entities import AlignmentResult, Gene
 
@@ -27,6 +28,10 @@ logger = logging.getLogger(__name__)
 
 # easy-search 输出列的顺序, 与 AlignmentResult 字段逐一对应(pident 为百分数, 需转为 0-1)。
 _FORMAT_OUTPUT = "query,target,pident,qcov,tcov,evalue,bits,alnlen"
+
+# 持久化索引(build_index/search 原语)的默认工作目录,运行期间不自动清理,
+# 贴合 LINC 断点续跑/增量添加数据的定位(与用户确认,2026-10-01)。
+_DEFAULT_WORK_DIR = os.path.join("output", ".linc_work", "mmseqs_db")
 
 
 @dataclass
@@ -36,6 +41,7 @@ class MMseqsConfig:
     sensitivity: float = 4.5
     evalue: float = 1e-5
     threads: int = 0  # 0 = mmseqs 自动检测
+    work_dir: str = _DEFAULT_WORK_DIR  # build_index 持久化索引的存放目录
 
 
 class MMseqsAligner:
@@ -152,3 +158,77 @@ class MMseqsAligner:
     ) -> List[AlignmentResult]:
         """新代表 vs 全局代表库 / 补边批量比对(Step3/Step5 用途)。"""
         return self._run_mmseqs_search(query, subject)
+
+    def build_index(
+        self, genes: Sequence[Gene], index_id: Optional[str] = None
+    ) -> Optional[str]:
+        """为 genes 建立持久化的 mmseqs DB(createdb), 返回 DB 路径作为 handle。
+
+        与 `_run_mmseqs_search`(easy-search 一把梭, 每次都重建+清理)不同,
+        本方法把 DB 建在 `MMseqsConfig.work_dir` 下、以 index_id 命名的子目录,
+        调用结束后不清理, 供后续 `search` 反复复用(不重新 createdb)。
+        """
+        if not genes:
+            return None
+        index_id = index_id or uuid.uuid4().hex
+        index_dir = os.path.join(self._config.work_dir, index_id)
+        os.makedirs(index_dir, exist_ok=True)
+        fasta_path = os.path.join(index_dir, "genes.fasta")
+        db_path = os.path.join(index_dir, "db")
+        self._write_fasta(genes, fasta_path)
+        cmd = ["mmseqs", "createdb", fasta_path, db_path, "-v", "1"]
+        logger.debug("调用 mmseqs: %s", " ".join(cmd))
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                f"mmseqs createdb 执行失败(returncode={exc.returncode}): "
+                f"{exc.stderr}"
+            ) from exc
+        return db_path
+
+    def search(self, query: Sequence[Gene], index: Any) -> List[AlignmentResult]:
+        """用 build_index 建好的持久化 DB(index, target/subject) 对 query 做比对。
+
+        内部手动拆分 createdb(仅 query) → search → convertalis 三步,
+        而非 easy-search 一把梭, 避免对已持久化的 index 重复建库。
+        """
+        if not query or not index:
+            return []
+
+        with tempfile.TemporaryDirectory(prefix="linc_mmseqs_search_") as tmp_dir:
+            query_fasta = os.path.join(tmp_dir, "query.fasta")
+            query_db = os.path.join(tmp_dir, "query_db")
+            result_db = os.path.join(tmp_dir, "result_db")
+            result_tsv = os.path.join(tmp_dir, "result.tsv")
+            work_dir = os.path.join(tmp_dir, "tmp")
+            os.makedirs(work_dir, exist_ok=True)
+
+            self._write_fasta(query, query_fasta)
+
+            create_cmd = ["mmseqs", "createdb", query_fasta, query_db, "-v", "1"]
+            search_cmd = [
+                "mmseqs", "search", query_db, index, result_db, work_dir,
+                "-s", str(self._config.sensitivity),
+                "-e", str(self._config.evalue),
+                "-v", "1",
+            ]
+            if self._config.threads > 0:
+                search_cmd += ["--threads", str(self._config.threads)]
+            convert_cmd = [
+                "mmseqs", "convertalis", query_db, index, result_db, result_tsv,
+                "--format-output", _FORMAT_OUTPUT,
+                "-v", "1",
+            ]
+
+            for cmd in (create_cmd, search_cmd, convert_cmd):
+                logger.debug("调用 mmseqs: %s", " ".join(cmd))
+                try:
+                    subprocess.run(cmd, check=True, capture_output=True, text=True)
+                except subprocess.CalledProcessError as exc:
+                    raise RuntimeError(
+                        f"mmseqs 命令执行失败(returncode={exc.returncode}): "
+                        f"{exc.stderr}"
+                    ) from exc
+
+            return self._parse_result_tsv(result_tsv)

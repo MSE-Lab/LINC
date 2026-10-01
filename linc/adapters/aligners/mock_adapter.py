@@ -10,7 +10,7 @@
    AlignmentResult(两条序列长度越接近, identity/coverage 越高), 保证同一对输入
    无论调用多少次结果都一致, 便于回归测试和端到端流程验证。
 """
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ...core.entities import AlignmentResult, Gene
 
@@ -70,3 +70,11 @@ class MockAligner:
     ) -> List[AlignmentResult]:
         """新代表 vs 全局代表库 / 补边批量比对。"""
         return [self._lookup_or_compute(q, s) for q in query for s in subject]
+
+    def build_index(self, genes: Sequence[Gene], index_id: Optional[str] = None) -> Any:
+        """Mock 场景无需真正建库, 直接以基因列表本身作为"索引" handle。"""
+        return list(genes)
+
+    def search(self, query: Sequence[Gene], index: Any) -> List[AlignmentResult]:
+        """用 build_index 返回的基因列表作为 target, 对 query 做笛卡尔积比对。"""
+        return [self._lookup_or_compute(q, s) for q in query for s in index]
