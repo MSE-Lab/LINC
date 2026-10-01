@@ -4,7 +4,9 @@ from linc.core.entities import (
     Cluster,
     Gene,
     Genome,
+    GenomeIntraResult,
     GenomeStatus,
+    LocalCluster,
     OrthologFamily,
     SSNEdge,
 )
@@ -97,3 +99,22 @@ def test_ortholog_family_size_property():
         edge_density=0.75,
     )
     assert family.size == 3
+
+
+def test_local_cluster_defaults_are_independent():
+    c1 = LocalCluster(cluster_id="g1|cluster_0")
+    c2 = LocalCluster(cluster_id="g1|cluster_1")
+    c1.member_ids.add("g1|1")
+    c1.representative_ids.append("g1|1")
+    assert c1.member_ids != c2.member_ids
+    assert c1.representative_ids != c2.representative_ids
+    assert c1.is_orphan is False
+
+
+def test_genome_intra_result_defaults_are_independent():
+    r1 = GenomeIntraResult(genome_id="g1")
+    r2 = GenomeIntraResult(genome_id="g2")
+    r1.local_clusters.append(LocalCluster(cluster_id="g1|cluster_0"))
+    assert r1.local_clusters != r2.local_clusters
+    assert r1.n_genes == 0
+    assert r1.n_clusters == 0

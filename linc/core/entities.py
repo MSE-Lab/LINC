@@ -113,6 +113,36 @@ class SSNEdge:
 
 
 @dataclass
+class LocalCluster:
+    """基因组内自聚类(Step2)产生的一个局部簇。
+
+    单成员簇(孤儿基因)的 representative_ids 与 member_ids 相同,is_orphan=True。
+    多成员簇根据簇内最小 pairwise identity 是否达到 Cutoff-II(即任意两个
+    成员是否都高度相似),representative_ids 可能只有 1 个(整体均质)或
+    多个(存在亚型分化,由 multi_representative_clustering 贪心覆盖选出,
+    数量不超过 max_per_cluster)。
+    """
+
+    cluster_id: str
+    member_ids: Set[str] = field(default_factory=set)
+    representative_ids: List[str] = field(default_factory=list)
+    is_orphan: bool = False
+
+
+@dataclass
+class GenomeIntraResult:
+    """单个基因组完成 Step2(基因组内自聚类)后的结果。"""
+
+    genome_id: str
+    local_clusters: List[LocalCluster] = field(default_factory=list)
+    local_representatives: List[str] = field(default_factory=list)
+    orphan_genes: List[str] = field(default_factory=list)
+    n_genes: int = 0
+    n_clusters: int = 0
+    n_representatives: int = 0
+
+
+@dataclass
 class OrthologFamily:
     """最终输出的直系同源基因家族(由 MCL 细分 SSN 连通分量得到)。"""
 

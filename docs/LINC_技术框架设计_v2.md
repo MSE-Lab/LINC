@@ -62,17 +62,17 @@ class Gene:
     length: int
     sequence: Optional[str] = None   # 允许延迟加载,大规模场景下不常驻内存
 
+class GenomeStatus(str, Enum):
+    PENDING = "pending"
+    LOADED = "loaded"
+    FAILED = "failed"
+
 @dataclass
 class Genome:
     genome_id: str
     file_path: str
     genes: List[Gene]
-    status: "GenomeStatus" = None
-
-class GenomeStatus(str, Enum):
-    PENDING = "pending"
-    LOADED = "loaded"
-    FAILED = "failed"
+    status: Optional[GenomeStatus] = None
 
 @dataclass
 class AlignmentResult:
@@ -120,6 +120,25 @@ class OrthologFamily:
     @property
     def size(self) -> int:
         return len(self.member_genes)
+
+@dataclass
+class LocalCluster:
+    """Step2 基因组内自聚类产生的局部簇。"""
+    cluster_id: str
+    member_ids: Set[str] = field(default_factory=set)
+    representative_ids: List[str] = field(default_factory=list)
+    is_orphan: bool = False
+
+@dataclass
+class GenomeIntraResult:
+    """单个基因组完成 Step2 后的结果。"""
+    genome_id: str
+    local_clusters: List[LocalCluster] = field(default_factory=list)
+    local_representatives: List[str] = field(default_factory=list)
+    orphan_genes: List[str] = field(default_factory=list)
+    n_genes: int = 0
+    n_clusters: int = 0
+    n_representatives: int = 0
 ```
 
 #### `core/events.py` — 领域事件(可观测性基础)
@@ -296,9 +315,15 @@ class IncrementalSSNEngine:
 | `SSNBuilderStage` | `IncrementalResult` | `CompleteSSN` | 稀疏图构建 + 长度过滤/去重补边 |
 | `FamilyRefineStage` | `CompleteSSN` | `MCLResult` | 自适应 Inflation + MCL 聚类 |
 
-> **算法细节不在本文档重复**,请始终以 `LINC_算法设计文档.md` 第 3 节(Order-D 排序、
+> **算法细节不在本文档重复**,请始终以 `docs/归档/LINC_算法设计文档.md` 第 3 节(Order-D 排序、
 > Union-Find、双阈值决策树、补边剪枝、MCL Inflation)作为算法真理来源(Single Source of Truth),
 > 本文档只定义"这些算法应该被放进哪个类、以什么接口对外暴露"。
+>
+> **已知偏离**: `IntraGenomeStage`(Step2)代表选取的判断依据已修正为"簇内最小 pairwise
+> identity 是否 >= Cutoff-II"(而非归档文档字面的"最大"值——该依据在语义上不成立,会导致
+> 多代表分支的贪心覆盖永远无法提前停止),并已实现 `multi_representative_clustering`
+> 为贪心覆盖(k-center 近似)算法。该项算法以 `linc/engine/intra_genome_stage.py` 的实现
+> 及其 docstring 为准,归档文档此处内容已过时。
 
 ---
 
