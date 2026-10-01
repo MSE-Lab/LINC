@@ -15,6 +15,13 @@ from .engine.genome_load_stage import GenomeLoadStage, discover_fasta_files
 
 app = typer.Typer(help="LINC: 增量基因组比较构建 SSN 并通过 MCL 细分蛋白质家族。")
 
+
+@app.callback()
+def main() -> None:
+    """LINC 命令行工具。"""
+    pass
+
+
 logger = logging.getLogger("linc")
 
 
