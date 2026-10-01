@@ -246,9 +246,9 @@ class ClusteringPort(Protocol):
 
 | Adapter | 实现的 Port | 说明 |
 |---------|------------|------|
-| `adapters/aligners/mmseqs_adapter.py` | `AlignerPort` | 封装 `mmseqs createdb/prefilter/align` 三步调用 |
-| `adapters/aligners/diamond_adapter.py` | `AlignerPort` | 封装 DIAMOND 调用(可选) |
-| `adapters/aligners/mock_adapter.py` | `AlignerPort` | 测试用,返回预设/随机比对结果,不依赖外部二进制 |
+| `adapters/aligners/mmseqs_adapter.py` | `AlignerPort` | 已实现。统一为 `build_index`(createdb,持久化索引)+ `search`(手动拆分 createdb(仅query)→search→convertalis 三步,复用已建索引)两步原语,`align_all_vs_all`/`align_query_vs_subject` 作为一把梭的便捷方法保留(走 `easy-search`) |
+| `adapters/aligners/diamond_adapter.py` | `AlignerPort` | 已实现。接口/组织方式与 `mmseqs_adapter.py` 对齐(`build_index`/`search` + 便捷方法),因 diamond 的 `blastp` 可直接以 fasta 作为 query,`search()` 比 mmseqs 更简单(query 侧无需单独建库) |
+| `adapters/aligners/mock_adapter.py` | `AlignerPort` | 测试用,返回预设/随机比对结果,不依赖外部二进制;同样实现了 `build_index`/`search`(索引 handle 直接是基因列表本身,无实际开销) |
 | `adapters/storage/memory_repo.py` | `RepositoryPort` | 纯内存实现,小规模/测试场景,不支持跨进程 resume |
 | `adapters/storage/sqlite_repo.py` | `RepositoryPort` | SQLite 持久化,支持 checkpoint/resume,适合大规模增量场景 |
 | `adapters/clustering/union_find_adapter.py` | `ClusteringPort` | Step2 基因组内聚类用 |
@@ -355,6 +355,46 @@ class IncrementalSSNEngine:
 
 该方案已在 `开发进度.md` 变更日志中记录,是 `GlobalJoinStage` 实现的既定设计依据。
 
+#### 跨进程结果非确定性问题与修复(与用户多轮排查确认,2026-10-01)
+
+实测中发现同样输入多次 `linc run --backend mmseqs` 的结果存在微小差异(簇数/代表数/边数
+相差个位数到百余个成员归属),经排查定位到两个独立根因并均已修复:
+
+1. **`representative_ids` 遍历顺序受 `PYTHONHASHSEED` 影响**: `Cluster.representative_ids`
+   字段类型为 `Set[str]`,`GlobalRepresentativeLibrary.representative_genes()` 原直接遍历该
+   set 构造下一次 query 的代表基因列表;Python 默认开启字符串哈希随机化,导致内容相同的
+   set 在不同进程间遍历顺序不同,使喂给比对工具的 query 序列顺序产生跨进程差异。
+   **修复**: 改为 `sorted(cluster.representative_ids)` 按字典序遍历,字段类型本身不变。
+2. **mmseqs2/diamond 比对结果内容确定,但输出行序不保证跨运行一致**: 通过最小复现实验
+   (两基因组反复 `createdb+search+convertalis`)证实,相同输入两次比对的结果集合完全相同,
+   但原始输出行序不同;而 `GlobalJoinStage` 的决策逻辑(如 `hit_by_cluster` 的平局判定)
+   依赖"先遇到的 hit"顺序,行序抖动被放大为簇归属差异。
+   **修复**: `mmseqs_adapter.py`/`diamond_adapter.py` 的结果解析方法均在返回前按
+   `(query_id, subject_id)` 字典序排序,使上层拿到的 `List[AlignmentResult]` 顺序恒定。
+3. **mmseqs 侧额外加固**: `search`/`easy-search` 命令均显式传 `--split 1`,禁用其基于运行时
+   可用内存的自动数据库分片机制(该机制会导致边界候选命中结果的微小抖动,与线程数无关);
+   CLI 新增 `--threads` 参数暴露给用户,默认 0(不显式指定,使用全部核心)。
+
+以上三处修复后,经用户在单线程(`--threads 1`)及多线程(默认全部核心)场景下各重跑两次
+验证,`join_summary.json` 的聚合指标与全部簇明细均完全一致,非确定性问题已彻底解决。
+
+#### 持久化工作目录的文件组织(`output/.linc_work/<backend>_db/`)
+
+`build_index`/`search` 两步原语约定的持久化目录结构(mmseqs/diamond 一致):
+
+```
+<work_dir>/<genome_id>/            # build_index() 建的索引目录(长期保留,不自动清理)
+├── genes.fasta                    # 该基因组全部基因的 fasta
+├── db*                            # createdb/makedb 产出的索引文件
+└── search/                        # search() 产出的比对中间/结果文件(同样不自动清理)
+    ├── query.fasta                # 本次调用的 query(通常是当前全局代表库)
+    ├── result.tsv                 # 比对结果(已按 (query_id, subject_id) 排序)
+    └── ...                        # mmseqs 额外产出 query_db*/result_db*/tmp/
+```
+
+`search/` 子目录每次调用前会先整体清空再重建,即"同一个 genome_id 重跑直接覆盖旧结果"
+(与用户确认的约定),索引本身(`genes.fasta`/`db*`)则长期保留、不随 `search` 调用清理。
+
 ---
 
 ### 2.5 `pipeline.py` — 声明式 Pipeline + Checkpoint/Resume
@@ -457,29 +497,40 @@ class LINCSettings:
 
 ---
 
-### 2.7 `cli.py` — 命令行入口
+### 2.7 `cli.py` — 命令行入口(已实现,较文档初始草图有所扩展)
+
+实际实现提前采用了 `typer`(非占位),并在 `linc run` 单命令内直接依次接通了
+`GenomeLoadStage`→`IntraGenomeStage`→`GlobalJoinStage` 三个 Stage(后续 Stage 完成后按
+同样方式扩展,命令行接口形态不再变动):
 
 ```python
-import typer   # 新增轻量依赖,替代裸脚本调用,体现"现代化" CLI 体验
+@app.callback()
+def _callback() -> None:
+    """空 callback, 强制 typer 保留子命令结构(否则单命令会被折叠,无法通过
+    `linc run ...` 调用)。"""
 
-app = typer.Typer()
-
-@app.command()
-def run(config: str = "config.yaml", resume: bool = False):
-    """运行完整 LINC 流程"""
-    ...
 
 @app.command()
-def resume(checkpoint_dir: str = "output/"):
-    """从上次 checkpoint 继续运行"""
+def run(
+    input_dir: str = typer.Option(..., "-i", "--input-dir"),
+    output_dir: str = typer.Option("output", "-o", "--output-dir"),
+    cutoff_i: float = typer.Option(0.5, "--cutoff-i"),
+    cutoff_ii: float = typer.Option(0.8, "--cutoff-ii"),
+    max_per_cluster: int = typer.Option(5, "--max-per-cluster"),
+    backend: str = typer.Option("mock", "--backend"),  # mock | mmseqs | diamond
+    threads: int = typer.Option(0, "--threads"),       # 0 = 不显式指定, 使用工具自身默认值
+    verbose: bool = typer.Option(False, "--verbose"),
+) -> None:
+    """运行 GenomeLoadStage + IntraGenomeStage + GlobalJoinStage,
+    输出 load_summary.json / intra_summary.json / join_summary.json。"""
     ...
-
-if __name__ == "__main__":
-    app()
 ```
 
-> 若不希望引入 `typer`,可退化为标准库 `argparse` 实现,功能等价但交互体验略逊。
-> 本期先用 `argparse` 占位实现,`typer` 作为后续可选升级项(见开发进度文档)。
+> 实际未新增 `resume` 子命令(第5步 pipeline/断点续跑尚未实现);也未采用 `config.yaml` 配置
+> 文件驱动方式,改为全部参数通过 CLI Option 直接传入,待第6步 `config/schema.py` 真正落地后
+> 再评估是否需要配置文件入口。
+> `--backend mmseqs|diamond` 时,`work_dir` 固定为 `<output_dir>/.linc_work/<backend>_db/`,
+> 随 `-o` 参数变化,运行期间不自动清理(贴合断点续跑/增量添加数据的定位)。
 
 ---
 
@@ -534,9 +585,9 @@ EngineResult { ortholog_families, ssn_edges, global_library, run_summary }
 5. `engine/incremental_engine.py` + `pipeline.py`(串联已实现的 Stage)
 6. `adapters/storage/memory_repo.py`(先用内存版跑通全流程)
 7. `config/schema.py` + `cli.py`(让整个系统可以通过命令行驱动)
-8. `adapters/aligners/mmseqs_adapter.py`(接入真实比对引擎,替换 Mock)
-9. `adapters/storage/sqlite_repo.py` + Checkpoint/Resume 完整验证
-10. `adapters/aligners/diamond_adapter.py` + `adapters/clustering/mcl_adapter.py`(补齐可选后端)
+8. `adapters/aligners/mmseqs_adapter.py`(接入真实比对引擎,替换 Mock)— **已完成**
+9. `adapters/storage/sqlite_repo.py` + Checkpoint/Resume 完整验证 — 未开始
+10. `adapters/aligners/diamond_adapter.py`(**已完成**)+ `adapters/clustering/mcl_adapter.py`(未开始,补齐可选后端)
 
 ---
 
