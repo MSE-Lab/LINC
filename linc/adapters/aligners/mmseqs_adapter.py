@@ -199,44 +199,58 @@ class MMseqsAligner:
 
         内部手动拆分 createdb(仅 query) → search → convertalis 三步,
         而非 easy-search 一把梭, 避免对已持久化的 index 重复建库。
+
+        比对的中间文件(query.fasta/result.tsv 等)持久化保存在 index 所在的
+        工作目录下(`<index_dir>/search/`), 不自动清理, 与 build_index 的
+        索引一并保留, 贴合断点续跑/增量添加数据的定位(与用户确认,
+        2026-10-01); 以 index 所在目录名(通常是 genome_id)为标识, 重跑
+        同一 genome_id 时直接覆盖旧结果。
         """
         if not query or not index:
             return []
 
-        with tempfile.TemporaryDirectory(prefix="linc_mmseqs_search_") as tmp_dir:
-            query_fasta = os.path.join(tmp_dir, "query.fasta")
-            query_db = os.path.join(tmp_dir, "query_db")
-            result_db = os.path.join(tmp_dir, "result_db")
-            result_tsv = os.path.join(tmp_dir, "result.tsv")
-            work_dir = os.path.join(tmp_dir, "tmp")
-            os.makedirs(work_dir, exist_ok=True)
+        index_dir = os.path.dirname(str(index))
+        if index_dir:
+            tmp_dir = os.path.join(index_dir, "search")
+        else:
+            tmp_dir = tempfile.mkdtemp(prefix="linc_mmseqs_search_")
+        query_fasta = os.path.join(tmp_dir, "query.fasta")
+        query_db = os.path.join(tmp_dir, "query_db")
+        result_db = os.path.join(tmp_dir, "result_db")
+        result_tsv = os.path.join(tmp_dir, "result.tsv")
+        work_dir = os.path.join(tmp_dir, "tmp")
+        # 每次重跑先清空旧的 query_db/result_db/work 子目录(mmseqs createdb/
+        # search 遇到已存在的同名 DB 文件会报错), 同时实现"同一标识(index
+        # 所在目录名, 通常是 genome_id)覆盖旧结果"的语义。
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        os.makedirs(work_dir, exist_ok=True)
 
-            self._write_fasta(query, query_fasta)
+        self._write_fasta(query, query_fasta)
 
-            create_cmd = ["mmseqs", "createdb", query_fasta, query_db, "-v", "1"]
-            search_cmd = [
-                "mmseqs", "search", query_db, index, result_db, work_dir,
-                "-s", str(self._config.sensitivity),
-                "-e", str(self._config.evalue),
-                "--split", "1",
-                "-v", "1",
-            ]
-            if self._config.threads > 0:
-                search_cmd += ["--threads", str(self._config.threads)]
-            convert_cmd = [
-                "mmseqs", "convertalis", query_db, index, result_db, result_tsv,
-                "--format-output", _FORMAT_OUTPUT,
-                "-v", "1",
-            ]
+        create_cmd = ["mmseqs", "createdb", query_fasta, query_db, "-v", "1"]
+        search_cmd = [
+            "mmseqs", "search", query_db, index, result_db, work_dir,
+            "-s", str(self._config.sensitivity),
+            "-e", str(self._config.evalue),
+            "--split", "1",
+            "-v", "1",
+        ]
+        if self._config.threads > 0:
+            search_cmd += ["--threads", str(self._config.threads)]
+        convert_cmd = [
+            "mmseqs", "convertalis", query_db, index, result_db, result_tsv,
+            "--format-output", _FORMAT_OUTPUT,
+            "-v", "1",
+        ]
 
-            for cmd in (create_cmd, search_cmd, convert_cmd):
-                logger.debug("调用 mmseqs: %s", " ".join(cmd))
-                try:
-                    subprocess.run(cmd, check=True, capture_output=True, text=True)
-                except subprocess.CalledProcessError as exc:
-                    raise RuntimeError(
-                        f"mmseqs 命令执行失败(returncode={exc.returncode}): "
-                        f"{exc.stderr}"
-                    ) from exc
+        for cmd in (create_cmd, search_cmd, convert_cmd):
+            logger.debug("调用 mmseqs: %s", " ".join(cmd))
+            try:
+                subprocess.run(cmd, check=True, capture_output=True, text=True)
+            except subprocess.CalledProcessError as exc:
+                raise RuntimeError(
+                    f"mmseqs 命令执行失败(returncode={exc.returncode}): "
+                    f"{exc.stderr}"
+                ) from exc
 
-            return self._parse_result_tsv(result_tsv)
+        return self._parse_result_tsv(result_tsv)

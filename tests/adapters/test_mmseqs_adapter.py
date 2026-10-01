@@ -3,6 +3,7 @@
 通过 monkeypatch 替换 shutil.which/subprocess.run, 不依赖真实安装的 mmseqs2
 二进制程序, 可在任意环境下运行(包括未安装 mmseqs 的 CI)。
 """
+import os
 import subprocess
 
 import pytest
@@ -209,15 +210,48 @@ def test_search_runs_createdb_search_convertalis_against_persisted_index(monkeyp
     monkeypatch.setattr(subprocess, "run", _fake_run)
 
     aligner = MMseqsAligner(MMseqsConfig(work_dir=_tmp_work_dir(tmp_path)))
-    results = aligner.search([_gene("q1", 10)], "/fake/persisted/db")
+    persisted_index = os.path.join(str(tmp_path), "persisted", "db")
+    results = aligner.search([_gene("q1", 10)], persisted_index)
 
     sub_commands = [c[1] for c in calls]
     assert sub_commands == ["createdb", "search", "convertalis"]
     # search/convertalis 都应直接使用传入的持久化 index 路径作为 target, 不重新 createdb
-    assert calls[1][3] == "/fake/persisted/db"
-    assert calls[2][3] == "/fake/persisted/db"
+    assert calls[1][3] == persisted_index
+    assert calls[2][3] == persisted_index
+    # 比对中间文件(query.fasta/result.tsv)应持久化保存在 index 所在目录的
+    # search/ 子目录下, 不使用临时目录(2026-10-01, 与用户确认)。
+    assert os.path.exists(os.path.join(str(tmp_path), "persisted", "search", "query.fasta"))
+    assert os.path.exists(os.path.join(str(tmp_path), "persisted", "search", "result.tsv"))
     assert len(results) == 1
     assert results[0].identity == pytest.approx(0.8)
+
+
+def test_search_overwrites_previous_results_for_same_index_dir(monkeypatch, tmp_path):
+    """重跑同一 index(如同一 genome_id)时应覆盖旧的 search/ 目录内容。"""
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
+
+    def _fake_run(cmd, check, capture_output, text):
+        if cmd[1] == "convertalis":
+            result_tsv = cmd[5]
+            with open(result_tsv, "w", encoding="utf-8") as fh:
+                fh.write("q1\ts1\t80.0\t0.8\t0.8\t1e-10\t100.0\t50")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    aligner = MMseqsAligner(MMseqsConfig(work_dir=_tmp_work_dir(tmp_path)))
+    persisted_index = os.path.join(str(tmp_path), "persisted", "db")
+
+    search_dir = os.path.join(str(tmp_path), "persisted", "search")
+    os.makedirs(search_dir, exist_ok=True)
+    stale_file = os.path.join(search_dir, "stale.txt")
+    with open(stale_file, "w", encoding="utf-8") as fh:
+        fh.write("stale")
+
+    aligner.search([_gene("q1", 10)], persisted_index)
+
+    assert not os.path.exists(stale_file)
+    assert os.path.exists(os.path.join(search_dir, "result.tsv"))
 
 
 def test_search_empty_query_or_index_returns_empty_without_calling_subprocess(monkeypatch, tmp_path):

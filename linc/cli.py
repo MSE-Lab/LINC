@@ -10,6 +10,8 @@ IntraGenomeStage/GlobalJoinStage 的比对后端可通过 `--backend` 选择(二
 - "mock"(默认, 用于单测/无 mmseqs 环境下打通流程): MockAligner 的长度相似度模式。
 - "mmseqs": 调用系统级 mmseqs2(需要已安装并在 PATH 中, 推荐通过 conda `linc`
   环境提供), 使用真实序列比对结果。
+- "diamond": 调用系统级 diamond(需要已安装并在 PATH 中, 推荐通过 conda `linc`
+  环境提供), 使用真实序列比对结果。
 """
 import json
 import logging
@@ -19,6 +21,7 @@ import typer
 
 from .adapters.aligners.mock_adapter import MockAligner
 from .adapters.aligners.mmseqs_adapter import MMseqsAligner, MMseqsConfig
+from .adapters.aligners.diamond_adapter import DiamondAligner, DiamondConfig
 from .adapters.clustering.union_find_adapter import UnionFindClustering
 from .core.entities import GenomeStatus
 from .engine.genome_load_stage import GenomeLoadStage, discover_fasta_files
@@ -126,14 +129,16 @@ def run(
         5, "--max-per-cluster", help="单个局部簇最多选取的代表数。"
     ),
     backend: str = typer.Option(
-        "mock", "--backend", help="比对引擎后端: mock(默认, 无需安装 mmseqs) | mmseqs(真实比对, 需已安装 mmseqs2)。"
+        "mock", "--backend",
+        help="比对引擎后端: mock(默认, 无需安装比对工具) | mmseqs(真实比对, 需已"
+             "安装 mmseqs2) | diamond(真实比对, 需已安装 diamond)。",
     ),
     threads: int = typer.Option(
         0, "--threads",
-        help="mmseqs 使用的线程数(仅 --backend mmseqs 生效)。0 = 不显式指定, 让 "
-             "mmseqs 使用其自身默认的全部核心数(注意: 多线程并行时 mmseqs 的结果"
-             "在极少数边界情况下不保证严格可复现, 如需完全可复现结果请指定 "
-             "--threads 1)。",
+        help="mmseqs/diamond 使用的线程数(仅 --backend mmseqs|diamond 生效)。"
+             "0 = 不显式指定, 让工具使用其自身默认的全部核心数(注意: 多线程并行"
+             "时结果在极少数边界情况下不保证严格可复现, 如需完全可复现结果请"
+             "指定 --threads 1)。",
     ),
     verbose: bool = typer.Option(False, "--verbose", help="输出 DEBUG 级别日志。"),
 ) -> None:
@@ -181,11 +186,14 @@ def run(
     if backend == "mmseqs":
         work_dir = os.path.join(output_dir, ".linc_work", "mmseqs_db")
         aligner = MMseqsAligner(MMseqsConfig(threads=threads, work_dir=work_dir))
+    elif backend == "diamond":
+        work_dir = os.path.join(output_dir, ".linc_work", "diamond_db")
+        aligner = DiamondAligner(DiamondConfig(threads=threads, work_dir=work_dir))
     elif backend == "mock":
         aligner = MockAligner()
     else:
         typer.secho(
-            f"未知的 --backend 取值: {backend}(可选: mock | mmseqs)",
+            f"未知的 --backend 取值: {backend}(可选: mock | mmseqs | diamond)",
             fg=typer.colors.RED,
             err=True,
         )
