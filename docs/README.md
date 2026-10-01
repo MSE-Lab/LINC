@@ -11,6 +11,7 @@
 
 | 文档 | 内容 |
 |------|------|
+| [LINC_算法设计文档.md](./LINC_算法设计文档.md) | 工程开发设计文档:模块划分、数据结构、算法规格、接口契约、边界情况 |
 | [MMseqs2_Aligner.md](./MMseqs2_Aligner.md) | MMseqs2 比对引擎:安装、配置、三步流程、参数说明 |
 | [STEP1_多基因组输入.md](./STEP1_多基因组输入.md) | Step 1: FASTA 文件解析、基因组元信息提取 |
 | [STEP2_基因组内自聚类.md](./STEP2_基因组内自聚类.md) | Step 2: 全对全比对、Union-Find 聚类、局部代表提取 |
@@ -260,6 +261,7 @@ python -c "from src.pipeline import LINC; print('OK')"
 ```
 docs/
 ├── README.md                    # 本文档
+├── LINC_算法设计文档.md         # 工程开发设计文档
 ├── STEP1_多基因组输入.md         # Step 1 技术文档
 ├── STEP2_基因组内自聚类.md       # Step 2 技术文档
 ├── STEP3_增量并入全局代表库.md  # Step 3 技术文档
