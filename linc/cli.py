@@ -18,7 +18,7 @@ import sys
 import typer
 
 from .adapters.aligners.mock_adapter import MockAligner
-from .adapters.aligners.mmseqs_adapter import MMseqsAligner
+from .adapters.aligners.mmseqs_adapter import MMseqsAligner, MMseqsConfig
 from .adapters.clustering.union_find_adapter import UnionFindClustering
 from .core.entities import GenomeStatus
 from .engine.genome_load_stage import GenomeLoadStage, discover_fasta_files
@@ -128,6 +128,13 @@ def run(
     backend: str = typer.Option(
         "mock", "--backend", help="比对引擎后端: mock(默认, 无需安装 mmseqs) | mmseqs(真实比对, 需已安装 mmseqs2)。"
     ),
+    threads: int = typer.Option(
+        0, "--threads",
+        help="mmseqs 使用的线程数(仅 --backend mmseqs 生效)。0 = 不显式指定, 让 "
+             "mmseqs 使用其自身默认的全部核心数(注意: 多线程并行时 mmseqs 的结果"
+             "在极少数边界情况下不保证严格可复现, 如需完全可复现结果请指定 "
+             "--threads 1)。",
+    ),
     verbose: bool = typer.Option(False, "--verbose", help="输出 DEBUG 级别日志。"),
 ) -> None:
     """运行 LINC 流水线(当前阶段已接通 GenomeLoadStage + IntraGenomeStage + GlobalJoinStage)。"""
@@ -172,7 +179,8 @@ def run(
         if genome.status == GenomeStatus.LOADED
     }
     if backend == "mmseqs":
-        aligner = MMseqsAligner()
+        work_dir = os.path.join(output_dir, ".linc_work", "mmseqs_db")
+        aligner = MMseqsAligner(MMseqsConfig(threads=threads, work_dir=work_dir))
     elif backend == "mock":
         aligner = MockAligner()
     else:

@@ -97,6 +97,8 @@ class MMseqsAligner:
                 str(self._config.evalue),
                 "--format-output",
                 _FORMAT_OUTPUT,
+                "--split",
+                "1",
                 "-v",
                 "1",
             ]
@@ -147,6 +149,11 @@ class MMseqsAligner:
                         alignment_length=int(alnlen),
                     )
                 )
+        # mmseqs 输出的行序不保证跨进程/跨运行一致(已通过最小复现实验验证:
+        # 相同输入两次运行的结果集合完全一致, 但行序不同), 而上层代码多处
+        # 依赖"先遇到的hit"做平局判定(如 GlobalJoinStage 的 hit_by_cluster)。
+        # 此处按 (query_id, subject_id) 字典序排序, 消除这个非确定性来源。
+        results.sort(key=lambda r: (r.query_id, r.subject_id))
         return results
 
     def align_all_vs_all(self, genes: Sequence[Gene]) -> List[AlignmentResult]:
@@ -211,6 +218,7 @@ class MMseqsAligner:
                 "mmseqs", "search", query_db, index, result_db, work_dir,
                 "-s", str(self._config.sensitivity),
                 "-e", str(self._config.evalue),
+                "--split", "1",
                 "-v", "1",
             ]
             if self._config.threads > 0:

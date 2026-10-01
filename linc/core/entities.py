@@ -166,11 +166,15 @@ class GlobalRepresentativeLibrary:
 
     def representative_genes(self) -> List["Gene"]:
         """返回当前所有存活簇的代表基因列表(作为下一次 query 使用)。"""
+        # 注意: representative_ids 是 Set[str], Python 字符串哈希随机化
+        # (PYTHONHASHSEED 每次进程启动随机)会导致 set 遍历顺序在不同运行间
+        # 不一致,进而影响喂给 mmseqs 的 query 序列顺序,产生跨进程的非确定性
+        # 结果差异;此处显式按 rep_id 字典序排序遍历,消除该非确定性来源。
         reps: List["Gene"] = []
         for cluster in self.clusters:
             if not cluster.active:
                 continue
-            for rep_id in cluster.representative_ids:
+            for rep_id in sorted(cluster.representative_ids):
                 gene = self._genes_by_id.get(rep_id)
                 if gene is not None:
                     reps.append(gene)
