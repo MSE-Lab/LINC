@@ -1,0 +1,35 @@
+# 忽略 macOS 系统生成的隐藏文件
+.DS_Store
+
+# 忽略测试用输入fasta文件和文件夹
+/fasta
+*.fasta
+*.fas
+
+# Python 编译/缓存产物
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# 打包/构建产物
+build/
+dist/
+*.egg-info/
+
+# IDE (PyCharm)
+.idea/
+
+# 测试/覆盖率缓存
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 项目运行产物
+logs/
+output/
+*.log
