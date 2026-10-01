@@ -298,5 +298,5 @@ MMseqs2 需要足够的内存来处理大型数据库。
 
 - [MMseqs2 官方文档](https://mmseqs2.readthedocs.io/)
 - [MMseqs2 GitHub](https://github.com/soedinglab/MMseqs2)
-- [LINC Step 2 - 基因组内自聚类](../docs/STEP2_基因组内自聚类.md)
-- [LINC Step 3 - 增量并入全局代表库](../docs/STEP3_增量并入全局代表库.md)
+- [LINC Step 2 - 基因组内自聚类](./STEP2_基因组内自聚类.md)
+- [LINC Step 3 - 增量并入全局代表库](./STEP3_增量并入全局代表库.md)

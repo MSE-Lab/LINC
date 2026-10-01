@@ -10,10 +10,8 @@ LINC 是一个以**增量方式比较多个基因组**、构建**序列相似性
 ## 文档索引
 
 - [docs/LINC_技术框架设计_v2.md](./docs/LINC_技术框架设计_v2.md) — 现代化技术框架设计(权威工程依据)
-- [docs/LINC_算法设计文档.md](./docs/LINC_算法设计文档.md) — 核心算法规格(Order-D 排序、双阈值决策树、MCL 等)
 - [docs/开发进度.md](./docs/开发进度.md) — 开发进度记录
-- [docs/STEP1~STEP6 系列文档](./docs) — 各阶段原理与流程说明
-- [docs/MMseqs2_Aligner.md](./docs/MMseqs2_Aligner.md) — MMseqs2 比对引擎集成说明
+- [docs/归档/](./docs/归档) — 历史文档归档(算法设计文档 v1、STEP1~STEP6 系列、MMseqs2_Aligner 等)
 
 ## 环境
 
