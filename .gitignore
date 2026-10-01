@@ -33,3 +33,6 @@ htmlcov/
 logs/
 output/
 *.log
+
+# junie规则
+.junie
