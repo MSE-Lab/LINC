@@ -31,7 +31,13 @@ from typing import Dict, List, Optional, Tuple
 
 import networkx as nx
 
-from ..core.entities import Genome, GenomeIntraResult, LocalCluster
+from ..core.entities import (
+    COV_MODE_BIDIRECTIONAL,
+    Genome,
+    GenomeIntraResult,
+    LocalCluster,
+    passes_inclusion_cutoff,
+)
 from ..core.events import ClusterCreated, DomainEvent, EventBus
 from ..ports.aligner_port import AlignerPort
 from ..ports.clustering_port import ClusteringPort
@@ -50,6 +56,8 @@ class IntraGenomeStage:
         clustering: ClusteringPort,
         cutoff_i: float = 0.5,
         cutoff_ii: float = 0.8,
+        cutoff_c: float = 0.0,
+        cov_mode: int = COV_MODE_BIDIRECTIONAL,
         max_per_cluster: int = 5,
         event_bus: Optional[EventBus] = None,
     ) -> None:
@@ -57,6 +65,8 @@ class IntraGenomeStage:
         self._clustering = clustering
         self._cutoff_i = cutoff_i
         self._cutoff_ii = cutoff_ii
+        self._cutoff_c = cutoff_c
+        self._cov_mode = cov_mode
         self._max_per_cluster = max_per_cluster
         self._event_bus = event_bus
 
@@ -81,7 +91,7 @@ class IntraGenomeStage:
                 continue   # 自身比对(all-vs-all 场景下 query/target 来自同一份序列集合)
             identity_map[(hit.query_id, hit.subject_id)] = hit.identity
             identity_map[(hit.subject_id, hit.query_id)] = hit.identity
-            if hit.identity >= self._cutoff_i:
+            if passes_inclusion_cutoff(hit, self._cutoff_i, self._cutoff_c, self._cov_mode):
                 graph.add_edge(hit.query_id, hit.subject_id)
 
         groups = self._clustering.cluster(graph)

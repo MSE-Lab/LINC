@@ -63,8 +63,46 @@ class AlignmentResult:
 
     @property
     def coverage(self) -> float:
-        """取 query/subject 覆盖度中较小的一个,作为保守覆盖度估计。"""
+        """取 query/subject 覆盖度中较小的一个,作为保守覆盖度估计。
+
+        等价于 `coverage_for_mode(self, cov_mode=0)`,保留此 property 是为了
+        向后兼容既有调用方;新代码如需按 cov_mode 可配置地取 coverage,
+        请使用 `coverage_for_mode`。
+        """
         return min(self.query_cover, self.subject_cover)
+
+
+# coverage 合成方式(参考 mmseqs2 的 --cov-mode 语义,与用户确认,2026-10-02):
+# 0 = 双向(取 query_cover/subject_cover 中较小者,两边都要达标才算数, 默认);
+# 1 = 仅看 subject_cover(target coverage);
+# 2 = 仅看 query_cover(query coverage)。
+COV_MODE_BIDIRECTIONAL = 0
+COV_MODE_SUBJECT = 1
+COV_MODE_QUERY = 2
+VALID_COV_MODES = (COV_MODE_BIDIRECTIONAL, COV_MODE_SUBJECT, COV_MODE_QUERY)
+
+
+def coverage_for_mode(hit: "AlignmentResult", cov_mode: int = COV_MODE_BIDIRECTIONAL) -> float:
+    """按 cov_mode 从一次比对结果中取出用于与 cutoff_c 比较的覆盖度数值。"""
+    if cov_mode == COV_MODE_SUBJECT:
+        return hit.subject_cover
+    if cov_mode == COV_MODE_QUERY:
+        return hit.query_cover
+    return min(hit.query_cover, hit.subject_cover)
+
+
+def passes_inclusion_cutoff(
+    hit: "AlignmentResult",
+    cutoff_i: float,
+    cutoff_c: float,
+    cov_mode: int = COV_MODE_BIDIRECTIONAL,
+) -> bool:
+    """统一的"纳入判据": identity >= cutoff_i 且 coverage(按cov_mode) >= cutoff_c。
+
+    IntraGenomeStage/GlobalJoinStage 均应调用本函数判定一次比对是否成簇,
+    避免两阶段各自实现而出现判据不一致(2026-10-02 与用户确认修复高危2)。
+    """
+    return hit.identity >= cutoff_i and coverage_for_mode(hit, cov_mode) >= cutoff_c
 
 
 @dataclass

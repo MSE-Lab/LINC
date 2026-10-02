@@ -14,25 +14,31 @@ def _make_gene(genome_id: str, local_id: int, length: int = 100) -> Gene:
     )
 
 
-def _result(a: Gene, b: Gene, identity: float) -> AlignmentResult:
+def _result(
+    a: Gene, b: Gene, identity: float, query_cover=None, subject_cover=None
+) -> AlignmentResult:
     return AlignmentResult(
         query_id=a.gene_id,
         subject_id=b.gene_id,
         identity=identity,
-        query_cover=identity,
-        subject_cover=identity,
+        query_cover=identity if query_cover is None else query_cover,
+        subject_cover=identity if subject_cover is None else subject_cover,
         evalue=0.0,
         bitscore=identity * 100,
         alignment_length=min(a.length, b.length),
     )
 
 
-def _stage(aligner, cutoff_i=0.5, cutoff_ii=0.8, max_per_cluster=5) -> IntraGenomeStage:
+def _stage(
+    aligner, cutoff_i=0.5, cutoff_ii=0.8, cutoff_c=0.0, cov_mode=0, max_per_cluster=5
+) -> IntraGenomeStage:
     return IntraGenomeStage(
         aligner=aligner,
         clustering=UnionFindClustering(),
         cutoff_i=cutoff_i,
         cutoff_ii=cutoff_ii,
+        cutoff_c=cutoff_c,
+        cov_mode=cov_mode,
         max_per_cluster=max_per_cluster,
     )
 
@@ -134,6 +140,40 @@ def test_representative_count_never_exceeds_max_per_cluster():
     assert result.n_clusters == 1
     cluster = result.local_clusters[0]
     assert len(cluster.representative_ids) <= 3
+
+
+def test_cutoff_c_filters_out_low_coverage_hit_even_if_identity_passes():
+    # identity 达标但覆盖度很低, 设置 cutoff_c=0.5 应让两个基因各自独立成孤儿簇,
+    # 而不是因 identity 达标而被连边。
+    g1, g2 = _make_gene("g1", 1), _make_gene("g1", 2)
+    aligner = MockAligner()
+    aligner.set_result(
+        g1.gene_id, g2.gene_id,
+        _result(g1, g2, identity=0.9, query_cover=0.1, subject_cover=0.1),
+    )
+    genome = Genome(genome_id="g1", file_path="g1.faa", genes=[g1, g2])
+
+    result = _stage(aligner, cutoff_i=0.5, cutoff_c=0.5).run(genome)
+
+    assert result.n_clusters == 2
+    assert set(result.orphan_genes) == {g1.gene_id, g2.gene_id}
+
+
+def test_cov_mode_subject_only_uses_subject_cover():
+    # cov_mode=1(仅看 subject_cover): query_cover 很低但 subject_cover 达标,
+    # 在该模式下应被连边成簇(与 cov_mode=0 双向模式的结果不同)。
+    g1, g2 = _make_gene("g1", 1), _make_gene("g1", 2)
+    aligner = MockAligner()
+    aligner.set_result(
+        g1.gene_id, g2.gene_id,
+        _result(g1, g2, identity=0.9, query_cover=0.1, subject_cover=0.9),
+    )
+    genome = Genome(genome_id="g1", file_path="g1.faa", genes=[g1, g2])
+
+    result = _stage(aligner, cutoff_i=0.5, cutoff_c=0.5, cov_mode=1).run(genome)
+
+    assert result.n_clusters == 1
+    assert set(result.orphan_genes) == set()
 
 
 def test_n_representatives_matches_sum_across_clusters():

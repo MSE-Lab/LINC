@@ -23,7 +23,7 @@ from .adapters.aligners.mock_adapter import MockAligner
 from .adapters.aligners.mmseqs_adapter import MMseqsAligner, MMseqsConfig
 from .adapters.aligners.diamond_adapter import DiamondAligner, DiamondConfig
 from .adapters.clustering.union_find_adapter import UnionFindClustering
-from .core.entities import GenomeStatus
+from .core.entities import VALID_COV_MODES, GenomeStatus
 from .engine.genome_load_stage import GenomeLoadStage, discover_fasta_files
 from .engine.global_join_stage import GlobalJoinStage
 from .engine.intra_genome_stage import IntraGenomeStage
@@ -47,6 +47,16 @@ def _setup_logging(verbose: bool) -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         stream=sys.stdout,
     )
+
+
+def _validate_cutoff_range(option_name: str, value: float) -> None:
+    """校验阈值类参数落在 [0, 1] 区间内, 否则直接退出并提示。"""
+    if not 0.0 <= value <= 1.0:
+        typer.secho(
+            f"{option_name} 必须在 [0, 1] 范围内, 当前为: {value}",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
 
 
 def _build_load_summary(genomes: dict) -> dict:
@@ -125,6 +135,16 @@ def run(
     cutoff_ii: float = typer.Option(
         0.8, "--cutoff-ii", help="Cutoff-II(高置信阈值): 判定代表选取策略。"
     ),
+    cutoff_c: float = typer.Option(
+        0.0, "--cutoff-c", help="Cutoff-C(覆盖度纳入阈值): 与 --cutoff-i 共同判定是否成簇, "
+             "默认 0.0 等价于不启用覆盖度过滤。"
+    ),
+    cov_mode: int = typer.Option(
+        0, "--cov-mode",
+        help="覆盖度合成方式(参考 mmseqs2 --cov-mode): "
+             "0=双向(取 query/subject 覆盖度较小者, 默认) | "
+             "1=仅看 subject 覆盖度 | 2=仅看 query 覆盖度。",
+    ),
     max_per_cluster: int = typer.Option(
         5, "--max-per-cluster", help="单个局部簇最多选取的代表数。"
     ),
@@ -147,6 +167,28 @@ def run(
 
     if not os.path.isdir(input_dir):
         typer.secho(f"输入目录不存在: {input_dir}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    _validate_cutoff_range("--cutoff-i", cutoff_i)
+    _validate_cutoff_range("--cutoff-ii", cutoff_ii)
+    _validate_cutoff_range("--cutoff-c", cutoff_c)
+    if cov_mode not in VALID_COV_MODES:
+        typer.secho(
+            f"--cov-mode 取值非法: {cov_mode}(可选: {', '.join(str(m) for m in VALID_COV_MODES)})",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+    if max_per_cluster < 1:
+        typer.secho(
+            f"--max-per-cluster 必须 >= 1, 当前为: {max_per_cluster}",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+    if threads < 0:
+        typer.secho(
+            f"--threads 必须 >= 0, 当前为: {threads}",
+            fg=typer.colors.RED, err=True,
+        )
         raise typer.Exit(code=1)
 
     genome_files = discover_fasta_files(input_dir)
@@ -204,6 +246,8 @@ def run(
         clustering=UnionFindClustering(),
         cutoff_i=cutoff_i,
         cutoff_ii=cutoff_ii,
+        cutoff_c=cutoff_c,
+        cov_mode=cov_mode,
         max_per_cluster=max_per_cluster,
     )
     logger.info("开始基因组内自聚类(IntraGenomeStage), 共 %d 个基因组", len(loaded_genomes))
@@ -228,6 +272,8 @@ def run(
         aligner=aligner,
         cutoff_i=cutoff_i,
         cutoff_ii=cutoff_ii,
+        cutoff_c=cutoff_c,
+        cov_mode=cov_mode,
         max_per_cluster=max_per_cluster,
     )
     logger.info("开始增量并入全局代表库(GlobalJoinStage), 共 %d 个基因组", len(loaded_genomes))

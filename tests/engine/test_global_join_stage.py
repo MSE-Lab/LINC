@@ -8,13 +8,15 @@ def _gene(genome_id: str, local_id: int, length: int = 100) -> Gene:
     return Gene(gene_id=f"{genome_id}|{local_id}", genome_id=genome_id, length=length)
 
 
-def _result(a: Gene, b: Gene, identity: float) -> AlignmentResult:
+def _result(
+    a: Gene, b: Gene, identity: float, query_cover=None, subject_cover=None
+) -> AlignmentResult:
     return AlignmentResult(
         query_id=a.gene_id,
         subject_id=b.gene_id,
         identity=identity,
-        query_cover=identity,
-        subject_cover=identity,
+        query_cover=identity if query_cover is None else query_cover,
+        subject_cover=identity if subject_cover is None else subject_cover,
         evalue=0.0,
         bitscore=identity * 100,
         alignment_length=min(a.length, b.length),
@@ -34,9 +36,16 @@ def _make_genome_and_intra(genome_id: str, genes, representatives):
     return genome, intra
 
 
-def _stage(aligner, cutoff_i=0.5, cutoff_ii=0.8, max_per_cluster=5) -> GlobalJoinStage:
+def _stage(
+    aligner, cutoff_i=0.5, cutoff_ii=0.8, cutoff_c=0.0, cov_mode=0, max_per_cluster=5
+) -> GlobalJoinStage:
     return GlobalJoinStage(
-        aligner=aligner, cutoff_i=cutoff_i, cutoff_ii=cutoff_ii, max_per_cluster=max_per_cluster
+        aligner=aligner,
+        cutoff_i=cutoff_i,
+        cutoff_ii=cutoff_ii,
+        cutoff_c=cutoff_c,
+        cov_mode=cov_mode,
+        max_per_cluster=max_per_cluster,
     )
 
 
@@ -180,6 +189,50 @@ def test_order_d_sorts_by_gene_count_desc_then_rep_count_desc_then_id_asc():
     )
 
     assert result.processing_order == ["genome_a", "genome_b"]
+
+
+def test_cutoff_c_filters_out_low_coverage_hit_even_if_identity_passes():
+    # identity 达到 cutoff_i, 但覆盖度很低(0.1), 设置 cutoff_c=0.5 应过滤掉该命中,
+    # 两个基因组各自独立成簇。
+    a = _gene("g1", 1, length=100)
+    b = _gene("g2", 1, length=100)
+    genome_a, intra_a = _make_genome_and_intra("g1", [a], [a.gene_id])
+    genome_b, intra_b = _make_genome_and_intra("g2", [b], [b.gene_id])
+
+    aligner = MockAligner()
+    aligner.set_result(
+        a.gene_id, b.gene_id,
+        _result(a, b, identity=0.95, query_cover=0.1, subject_cover=0.1),
+    )
+
+    result = _stage(aligner, cutoff_i=0.5, cutoff_ii=0.8, cutoff_c=0.5).run(
+        {"g1": genome_a, "g2": genome_b}, {"g1": intra_a, "g2": intra_b}
+    )
+
+    assert result.n_clusters_final == 2
+    assert result.n_representatives_final == 2
+
+
+def test_cov_mode_query_only_ignores_low_subject_coverage():
+    # cov_mode=2(仅看 query_cover): subject_cover 很低但 query_cover 达标,
+    # 在该模式下应被纳入(与 cov_mode=0 双向模式的结果不同)。
+    a = _gene("g1", 1, length=100)
+    b = _gene("g2", 1, length=100)
+    genome_a, intra_a = _make_genome_and_intra("g1", [a], [a.gene_id])
+    genome_b, intra_b = _make_genome_and_intra("g2", [b], [b.gene_id])
+
+    aligner = MockAligner()
+    aligner.set_result(
+        a.gene_id, b.gene_id,
+        _result(a, b, identity=0.95, query_cover=0.9, subject_cover=0.1),
+    )
+
+    result = _stage(
+        aligner, cutoff_i=0.5, cutoff_ii=0.8, cutoff_c=0.5, cov_mode=2
+    ).run({"g1": genome_a, "g2": genome_b}, {"g1": intra_a, "g2": intra_b})
+
+    assert result.n_clusters_final == 1
+    assert result.n_representatives_final == 1
 
 
 def test_max_per_cluster_caps_single_cluster_path_representatives():

@@ -20,6 +20,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 from ..core.entities import (
+    COV_MODE_BIDIRECTIONAL,
     AlignmentResult,
     Gene,
     Genome,
@@ -27,6 +28,7 @@ from ..core.entities import (
     GlobalRepresentativeLibrary,
     IncrementalResult,
     SSNEdge,
+    passes_inclusion_cutoff,
 )
 from ..core.events import (
     ClusterCreated,
@@ -49,12 +51,16 @@ class GlobalJoinStage:
         aligner: AlignerPort,
         cutoff_i: float = 0.5,
         cutoff_ii: float = 0.8,
+        cutoff_c: float = 0.0,
+        cov_mode: int = COV_MODE_BIDIRECTIONAL,
         max_per_cluster: int = 5,
         event_bus: Optional[EventBus] = None,
     ) -> None:
         self._aligner = aligner
         self._cutoff_i = cutoff_i
         self._cutoff_ii = cutoff_ii
+        self._cutoff_c = cutoff_c
+        self._cov_mode = cov_mode
         self._max_per_cluster = max_per_cluster
         self._event_bus = event_bus
         self._cluster_counter = 0
@@ -147,7 +153,7 @@ class GlobalJoinStage:
 
         hits_by_gene: Dict[str, List[AlignmentResult]] = defaultdict(list)
         for hit in hits:
-            if hit.identity >= self._cutoff_i and hit.coverage >= self._cutoff_i:
+            if passes_inclusion_cutoff(hit, self._cutoff_i, self._cutoff_c, self._cov_mode):
                 hits_by_gene[hit.subject_id].append(hit)
 
         for rep_id in sorted(intra.local_representatives):
