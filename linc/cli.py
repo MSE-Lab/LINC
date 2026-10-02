@@ -1,8 +1,12 @@
 """LINC 命令行入口。
 
-当前阶段(第4步 engine 层开发中)已接通 GenomeLoadStage + IntraGenomeStage +
-GlobalJoinStage,后续每接通一个新 Stage,直接在 `run` 命令内部继续往后扩展
-流水线调用,CLI 接口形态本身(`linc run -i <目录> -o <输出目录>`)不再变动。
+第5步(2026-10-02, 与用户确认): CLI 不再手工串联 5 个 Stage, 而是构造
+`pipeline.Pipeline` 并调用其 `run()` 一次性完成全部编排(GenomeLoadStage ->
+IntraGenomeStage -> GlobalJoinStage -> SSNBuilderStage -> FamilyRefineStage);
+`cli.py` 只负责参数解析/校验, 以及把 `Pipeline.run()` 返回的 `PipelineResult`
+转换为各阶段的摘要 json/Orthogroups.txt 并打印, 不再包含任何 Stage 编排逻辑
+本身(便于未来非 CLI 调用方式直接复用 `Pipeline`)。CLI 接口形态本身
+(`linc run -i <目录> -o <输出目录>`)不受影响。
 
 IntraGenomeStage/GlobalJoinStage 的比对后端可通过 `--aligner` 选择(二者共用
 同一个 aligner 实例, 以便 GlobalJoinStage 复用 IntraGenomeStage 阶段已建好的
@@ -34,15 +38,9 @@ from .core.entities import (
     VALID_EDGE_WEIGHT_MODES,
     GenomeStatus,
 )
-from .engine.family_refine_stage import FamilyRefineStage
-from .engine.genome_load_stage import (
-    GenomeIdConflictError,
-    GenomeLoadStage,
-    discover_fasta_files,
-)
-from .engine.global_join_stage import GlobalJoinStage
-from .engine.intra_genome_stage import IntraGenomeStage
-from .engine.ssn_builder_stage import SSNBuilderStage
+from .engine.genome_load_stage import GenomeIdConflictError, discover_fasta_files
+from .adapters.storage.memory_repo import MemoryRepository
+from .pipeline import Pipeline, PipelineConfig
 
 app = typer.Typer(help="LINC: 增量基因组比较构建 SSN 并通过 MCL 细分蛋白质家族。")
 
@@ -349,16 +347,45 @@ def run(
             err=True,
         )
 
+    aligner = _build_aligner(aligner_backend, threads, output_dir)
+    if aligner is None:
+        typer.secho(
+            f"未知的 --aligner 取值: {aligner_backend}(可选: mmseqs | diamond)",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    logger.info("比对后端: %s", aligner_backend)
+
+    pipeline = Pipeline(
+        aligner=aligner,
+        clustering_for_intra=UnionFindClustering(),
+        clustering_for_mcl=_build_clustering(output_dir),
+        repository=MemoryRepository(),
+        config=PipelineConfig(
+            cutoff_i=cutoff_i,
+            cutoff_ii=cutoff_ii,
+            cutoff_c=cutoff_c,
+            cov_mode=cov_mode,
+            max_per_cluster=max_per_cluster,
+            edge_completion_mode=edge_completion_mode,
+            mega_cluster_warning_threshold=mega_cluster_warning_threshold,
+            inflation=inflation,
+            edge_weight_mode=edge_weight_mode,
+            edge_weight_alpha=edge_weight_alpha,
+        ),
+    )
+
     logger.info("开始加载基因组, 共发现 %d 个候选文件", len(genome_files))
     try:
-        genomes = GenomeLoadStage().run(genome_files)
+        result = pipeline.run(genome_files)
     except GenomeIdConflictError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
-    summary = _build_load_summary(genomes)
-
     os.makedirs(output_dir, exist_ok=True)
+
+    summary = _build_load_summary(result.genomes)
     summary_path = os.path.join(output_dir, "load_summary.json")
     with open(summary_path, "w", encoding="utf-8") as fh:
         json.dump(summary, fh, ensure_ascii=False, indent=2)
@@ -374,36 +401,7 @@ def run(
         )
     typer.echo(f"摘要已写入: {summary_path}")
 
-    loaded_genomes = {
-        genome_id: genome
-        for genome_id, genome in genomes.items()
-        if genome.status == GenomeStatus.LOADED
-    }
-    aligner = _build_aligner(aligner_backend, threads, output_dir)
-    if aligner is None:
-        typer.secho(
-            f"未知的 --aligner 取值: {aligner_backend}(可选: mmseqs | diamond)",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    logger.info("比对后端: %s", aligner_backend)
-    intra_stage = IntraGenomeStage(
-        aligner=aligner,
-        clustering=UnionFindClustering(),
-        cutoff_i=cutoff_i,
-        cutoff_ii=cutoff_ii,
-        cutoff_c=cutoff_c,
-        cov_mode=cov_mode,
-        max_per_cluster=max_per_cluster,
-    )
-    logger.info("开始基因组内自聚类(IntraGenomeStage), 共 %d 个基因组", len(loaded_genomes))
-    intra_results = {
-        genome_id: intra_stage.run(genome)
-        for genome_id, genome in loaded_genomes.items()
-    }
-
-    intra_summary = _build_intra_summary(intra_results)
+    intra_summary = _build_intra_summary(result.intra_results)
     intra_summary_path = os.path.join(output_dir, "intra_summary.json")
     with open(intra_summary_path, "w", encoding="utf-8") as fh:
         json.dump(intra_summary, fh, ensure_ascii=False, indent=2)
@@ -415,18 +413,7 @@ def run(
     )
     typer.echo(f"摘要已写入: {intra_summary_path}")
 
-    join_stage = GlobalJoinStage(
-        aligner=aligner,
-        cutoff_i=cutoff_i,
-        cutoff_ii=cutoff_ii,
-        cutoff_c=cutoff_c,
-        cov_mode=cov_mode,
-        max_per_cluster=max_per_cluster,
-    )
-    logger.info("开始增量并入全局代表库(GlobalJoinStage), 共 %d 个基因组", len(loaded_genomes))
-    join_result = join_stage.run(loaded_genomes, intra_results)
-
-    join_summary = _build_join_summary(join_result)
+    join_summary = _build_join_summary(result.join_result)
     join_summary_path = os.path.join(output_dir, "join_summary.json")
     with open(join_summary_path, "w", encoding="utf-8") as fh:
         json.dump(join_summary, fh, ensure_ascii=False, indent=2)
@@ -438,15 +425,7 @@ def run(
     )
     typer.echo(f"摘要已写入: {join_summary_path}")
 
-    ssn_stage = SSNBuilderStage(
-        aligner=aligner,
-        edge_completion_mode=edge_completion_mode,
-        mega_cluster_warning_threshold=mega_cluster_warning_threshold,
-    )
-    logger.info("开始构建序列相似性网络(SSNBuilderStage), edge_completion_mode=%s", edge_completion_mode)
-    complete_ssn = ssn_stage.run(loaded_genomes, intra_results, join_result)
-
-    ssn_summary = _build_ssn_summary(complete_ssn)
+    ssn_summary = _build_ssn_summary(result.complete_ssn)
     ssn_summary_path = os.path.join(output_dir, "ssn_summary.json")
     with open(ssn_summary_path, "w", encoding="utf-8") as fh:
         json.dump(ssn_summary, fh, ensure_ascii=False, indent=2)
@@ -457,26 +436,13 @@ def run(
     )
     typer.echo(f"摘要已写入: {ssn_summary_path}")
 
-    clustering = _build_clustering(output_dir)
-    family_stage = FamilyRefineStage(
-        clustering=clustering,
-        inflation=inflation,
-        edge_weight_mode=edge_weight_mode,
-        edge_weight_alpha=edge_weight_alpha,
-    )
-    logger.info(
-        "开始MCL亚家族细分(FamilyRefineStage), inflation=%.2f, edge_weight_mode=%s",
-        inflation, edge_weight_mode,
-    )
-    families = family_stage.run(complete_ssn)
-
-    family_summary = _build_family_summary(families, inflation, edge_weight_mode)
+    family_summary = _build_family_summary(result.families, inflation, edge_weight_mode)
     family_summary_path = os.path.join(output_dir, "family_summary.json")
     with open(family_summary_path, "w", encoding="utf-8") as fh:
         json.dump(family_summary, fh, ensure_ascii=False, indent=2)
 
     orthogroups_path = os.path.join(output_dir, "Orthogroups.txt")
-    _write_orthogroups_txt(families, orthogroups_path)
+    _write_orthogroups_txt(result.families, orthogroups_path)
 
     typer.echo(f"MCL 亚家族细分完成: 共 {family_summary['n_families']} 个直系同源家族")
     typer.echo(f"摘要已写入: {family_summary_path}")

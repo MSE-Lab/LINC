@@ -1,6 +1,11 @@
-"""MemoryRepository 单元测试。"""
+"""MemoryRepository 单元测试。
+
+2026-10-02 第5步(pipeline打通)与用户确认重新设计接口: 按 engine/ 五个
+Stage 的实际产出类型逐一对应提供 save/load 方法(取代早期版本里粗粒度的
+checkpoint/global_library/ssn_edges)。
+"""
 from linc.adapters.storage.memory_repo import MemoryRepository
-from linc.core.entities import Cluster, SSNEdge
+from linc.core.entities import CompleteSSN, Genome, GenomeIntraResult, IncrementalResult, OrthologFamily, SSNEdge
 from linc.ports.storage_port import RepositoryPort
 
 
@@ -8,65 +13,74 @@ def test_memory_repo_satisfies_repository_port():
     assert isinstance(MemoryRepository(), RepositoryPort)
 
 
-def test_checkpoint_roundtrip_and_missing_returns_none():
+def test_genomes_roundtrip_and_missing_returns_empty_dict():
     repo = MemoryRepository()
-    assert repo.load_checkpoint("stage1") is None
-    repo.save_checkpoint("stage1", {"progress": 3})
-    assert repo.load_checkpoint("stage1") == {"progress": 3}
+    assert repo.load_genomes() == {}
+    genome = Genome(genome_id="g1", file_path="g1.faa")
+    repo.save_genomes({"g1": genome})
+    loaded = repo.load_genomes()
+    assert loaded["g1"] == genome
 
 
-def test_checkpoint_save_is_deep_copied_not_aliased():
+def test_genomes_save_is_deep_copied_not_aliased():
     repo = MemoryRepository()
-    state = {"progress": 1, "items": [1, 2, 3]}
-    repo.save_checkpoint("stage1", state)
-    state["items"].append(4)  # 修改原对象, 不应影响已保存的快照
-    saved = repo.load_checkpoint("stage1")
-    assert saved["items"] == [1, 2, 3]
+    genome = Genome(genome_id="g1", file_path="g1.faa")
+    genomes = {"g1": genome}
+    repo.save_genomes(genomes)
+    genomes["g1"].file_path = "mutated.faa"  # 修改原对象, 不应影响已保存的快照
+    assert repo.load_genomes()["g1"].file_path == "g1.faa"
 
 
-def test_checkpoint_load_returns_independent_copy():
+def test_genomes_load_returns_independent_copy():
     repo = MemoryRepository()
-    repo.save_checkpoint("stage1", {"items": [1, 2]})
-    loaded_once = repo.load_checkpoint("stage1")
-    loaded_once["items"].append(99)
-    loaded_twice = repo.load_checkpoint("stage1")
-    assert loaded_twice["items"] == [1, 2]
+    repo.save_genomes({"g1": Genome(genome_id="g1", file_path="g1.faa")})
+    loaded_once = repo.load_genomes()
+    loaded_once["g1"].file_path = "mutated.faa"
+    loaded_twice = repo.load_genomes()
+    assert loaded_twice["g1"].file_path == "g1.faa"
 
 
-def test_multiple_stage_checkpoints_are_independent():
+def test_intra_results_roundtrip_and_missing_returns_empty_dict():
     repo = MemoryRepository()
-    repo.save_checkpoint("stage1", {"a": 1})
-    repo.save_checkpoint("stage2", {"b": 2})
-    assert repo.load_checkpoint("stage1") == {"a": 1}
-    assert repo.load_checkpoint("stage2") == {"b": 2}
+    assert repo.load_intra_results() == {}
+    result = GenomeIntraResult(genome_id="g1", n_genes=3)
+    repo.save_intra_results({"g1": result})
+    assert repo.load_intra_results()["g1"].n_genes == 3
 
 
-def test_global_library_roundtrip():
+def test_join_result_roundtrip_and_missing_returns_none():
     repo = MemoryRepository()
-    assert repo.load_global_library() == {}
-    cluster = Cluster(cluster_id="c1", representative_ids={"g1"}, member_ids={"g1", "g2"})
-    repo.save_global_library({"c1": cluster})
-    loaded = repo.load_global_library()
-    assert loaded["c1"] is cluster
+    assert repo.load_join_result() is None
+    result = IncrementalResult(processing_order=["g1", "g2"], n_clusters_final=2)
+    repo.save_join_result(result)
+    loaded = repo.load_join_result()
+    assert loaded.processing_order == ["g1", "g2"]
+    assert loaded.n_clusters_final == 2
 
 
-def test_global_library_save_overwrites_previous():
+def test_join_result_save_overwrites_previous():
     repo = MemoryRepository()
-    repo.save_global_library({"c1": Cluster(cluster_id="c1")})
-    repo.save_global_library({"c2": Cluster(cluster_id="c2")})
-    assert list(repo.load_global_library().keys()) == ["c2"]
+    repo.save_join_result(IncrementalResult(n_clusters_final=1))
+    repo.save_join_result(IncrementalResult(n_clusters_final=2))
+    assert repo.load_join_result().n_clusters_final == 2
 
 
-def test_save_ssn_edges_stores_as_set():
+def test_complete_ssn_roundtrip_and_missing_returns_none():
     repo = MemoryRepository()
-    repo.save_ssn_edges({("a", "b"), ("b", "c")})
-    assert repo._ssn_edges == {("a", "b"), ("b", "c")}
+    assert repo.load_complete_ssn() is None
+    edge = SSNEdge(source="g1|1", target="g2|1", identity=0.8, coverage=0.5)
+    ssn = CompleteSSN(edges={edge}, edge_completion_mode="full")
+    repo.save_complete_ssn(ssn)
+    loaded = repo.load_complete_ssn()
+    assert loaded.edge_completion_mode == "full"
+    assert len(loaded.edges) == 1
 
 
-def test_save_ssn_edges_accepts_real_ssn_edge_instances_and_dedupes():
+def test_families_roundtrip_and_missing_returns_empty_list():
     repo = MemoryRepository()
-    edge_1 = SSNEdge(source="g1|1", target="g2|1", identity=0.8, coverage=0.5)
-    # 与 edge_1 代表同一对基因(方向相反+微小浮点误差),应被去重为同一条边
-    edge_2 = SSNEdge(source="g2|1", target="g1|1", identity=0.8000001, coverage=0.5)
-    repo.save_ssn_edges({edge_1, edge_2})
-    assert len(repo._ssn_edges) == 1
+    assert repo.load_families() == []
+    family = OrthologFamily(family_id="OG0000000", component_id=0, member_genes={"g1|1", "g2|1"})
+    repo.save_families([family])
+    loaded = repo.load_families()
+    assert len(loaded) == 1
+    assert loaded[0].family_id == "OG0000000"

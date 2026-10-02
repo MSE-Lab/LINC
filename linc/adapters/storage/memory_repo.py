@@ -2,36 +2,54 @@
 
 设计依据: docs/LINC_技术框架设计_v2.md 第 2.3 节: "纯内存实现, 小规模/测试场景,
 不支持跨进程 resume"。所有状态只保存在进程内存中, 进程结束即丢失, 因此
-`load_checkpoint` 在同一进程内可用于"同次运行中途重试", 但不能用于真正的
-跨进程断点续跑(该需求由 adapters/storage/sqlite_repo.py 负责, 见开发进度第8步)。
+`load_*` 在同一进程内可用于"同次运行中途重试", 但不能用于真正的跨进程断点
+续跑/增量追加(该需求由 adapters/storage/sqlite_repo.py 负责, 见开发进度第8步)。
+
+第5步(pipeline打通)与用户确认, 接口按 engine/ 五个 Stage 的实际产出类型
+逐一对应(而非早期版本里粗粒度的 checkpoint/global_library/ssn_edges)。
 """
 import copy
-from typing import Dict, Optional, Set
+from typing import Dict, List, Optional
 
-from ...core.entities import Cluster, SSNEdge
+from ...core.entities import CompleteSSN, Genome, GenomeIntraResult, IncrementalResult, OrthologFamily
 
 
 class MemoryRepository:
     """RepositoryPort 的内存实现。"""
 
     def __init__(self) -> None:
-        self._checkpoints: Dict[str, dict] = {}
-        self._global_library: Dict[str, Cluster] = {}
-        self._ssn_edges: Set[SSNEdge] = set()
+        self._genomes: Dict[str, Genome] = {}
+        self._intra_results: Dict[str, GenomeIntraResult] = {}
+        self._join_result: Optional[IncrementalResult] = None
+        self._complete_ssn: Optional[CompleteSSN] = None
+        self._families: List[OrthologFamily] = []
 
-    def save_checkpoint(self, stage: str, state: dict) -> None:
-        # 深拷贝, 避免调用方后续修改原 dict 影响已保存的快照
-        self._checkpoints[stage] = copy.deepcopy(state)
+    def save_genomes(self, genomes: Dict[str, Genome]) -> None:
+        self._genomes = copy.deepcopy(genomes)
 
-    def load_checkpoint(self, stage: str) -> Optional[dict]:
-        state = self._checkpoints.get(stage)
-        return copy.deepcopy(state) if state is not None else None
+    def load_genomes(self) -> Dict[str, Genome]:
+        return copy.deepcopy(self._genomes)
 
-    def save_global_library(self, clusters: dict) -> None:
-        self._global_library = dict(clusters)
+    def save_intra_results(self, results: Dict[str, GenomeIntraResult]) -> None:
+        self._intra_results = copy.deepcopy(results)
 
-    def load_global_library(self) -> dict:
-        return dict(self._global_library)
+    def load_intra_results(self) -> Dict[str, GenomeIntraResult]:
+        return copy.deepcopy(self._intra_results)
 
-    def save_ssn_edges(self, edges: set) -> None:
-        self._ssn_edges = set(edges)
+    def save_join_result(self, result: IncrementalResult) -> None:
+        self._join_result = copy.deepcopy(result)
+
+    def load_join_result(self) -> Optional[IncrementalResult]:
+        return copy.deepcopy(self._join_result) if self._join_result is not None else None
+
+    def save_complete_ssn(self, ssn: CompleteSSN) -> None:
+        self._complete_ssn = copy.deepcopy(ssn)
+
+    def load_complete_ssn(self) -> Optional[CompleteSSN]:
+        return copy.deepcopy(self._complete_ssn) if self._complete_ssn is not None else None
+
+    def save_families(self, families: List[OrthologFamily]) -> None:
+        self._families = copy.deepcopy(families)
+
+    def load_families(self) -> List[OrthologFamily]:
+        return copy.deepcopy(self._families)
