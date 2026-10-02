@@ -184,6 +184,18 @@ class SSNEdge:
         return hash(self._pair_key())
 
 
+# SSNEdge.weight() 支持的合法 mode 取值(用于 CLI --edge-weight-mode 的参数
+# 校验, 2026-10-02 与用户确认, 不包含向后兼容别名 identity_only/coverage_only,
+# 对外只暴露这5个正式名称)。
+VALID_EDGE_WEIGHT_MODES = (
+    "identity",
+    "coverage",
+    "identity_x_coverage",
+    "identity_coverage_weighted",
+    "bitscore",
+)
+
+
 @dataclass
 class LocalCluster:
     """基因组内自聚类(Step2)产生的一个局部簇。

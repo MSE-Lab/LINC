@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 
 import linc.cli as cli_module
 from linc.adapters.aligners.mock_adapter import MockAligner
+from linc.adapters.clustering.union_find_adapter import UnionFindClustering
 from linc.cli import app
 
 runner = CliRunner()
@@ -20,6 +21,16 @@ runner = CliRunner()
 @pytest.fixture(autouse=True)
 def _use_mock_aligner(monkeypatch):
     monkeypatch.setattr(cli_module, "_build_aligner", lambda *a, **kw: MockAligner())
+
+
+@pytest.fixture(autouse=True)
+def _use_fake_clustering(monkeypatch):
+    # FamilyRefineStage 的 MCL 细分步骤要求本机已安装系统级 mcl, 单测环境
+    # 不应该强依赖该外部二进制; UnionFindClustering 同样满足 ClusteringPort
+    # 接口(cluster(graph, **params) -> List[Set[str]]), 对每个连通分量
+    # (本身已经是连通的子图)返回其自身作为唯一簇, 足以验证 CLI 层面的
+    # 参数校验/日志/摘要文件格式, 不需要真实 MCL 聚类效果(2026-10-02)。
+    monkeypatch.setattr(cli_module, "_build_clustering", lambda *a, **kw: UnionFindClustering())
 
 
 def _write_fasta(path: str, records: list) -> None:
@@ -339,3 +350,111 @@ def test_run_full_edge_completion_mode_end_to_end(tmp_path):
     assert result.exit_code == 0
     ssn_summary = json.loads((output_dir / "ssn_summary.json").read_text(encoding="utf-8"))
     assert ssn_summary["edge_completion_mode"] == "full"
+
+
+def test_run_writes_family_summary_and_orthogroups(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV"), ("g2", "MKL")])
+    _write_fasta(str(input_dir / "genome02.faa"), [("g3", "MKV")])
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(
+        app, ["run", "-i", str(input_dir), "-o", str(output_dir)]
+    )
+
+    assert result.exit_code == 0
+    assert "MCL 亚家族细分完成" in result.stdout
+
+    family_summary_path = output_dir / "family_summary.json"
+    assert family_summary_path.exists()
+    family_summary = json.loads(family_summary_path.read_text(encoding="utf-8"))
+    assert family_summary["inflation"] == pytest.approx(1.5)
+    assert family_summary["edge_weight_mode"] == "identity_x_coverage"
+    assert isinstance(family_summary["n_families"], int)
+    assert family_summary["n_families"] >= 1
+    for family in family_summary["families"]:
+        assert family["family_id"].startswith("OG")
+        assert family["size"] >= 1
+
+    orthogroups_path = output_dir / "Orthogroups.txt"
+    assert orthogroups_path.exists()
+    lines = orthogroups_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == family_summary["n_families"]
+    for line in lines:
+        og_id, members = line.split("\t")
+        assert og_id.startswith("OG")
+        assert len(members.split(" ")) >= 1
+
+
+def test_run_custom_inflation_and_edge_weight_mode(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(
+        app,
+        [
+            "run", "-i", str(input_dir), "-o", str(output_dir),
+            "--inflation", "2.0", "--edge-weight-mode", "bitscore",
+        ],
+    )
+
+    assert result.exit_code == 0
+    family_summary = json.loads(
+        (output_dir / "family_summary.json").read_text(encoding="utf-8")
+    )
+    assert family_summary["inflation"] == pytest.approx(2.0)
+    assert family_summary["edge_weight_mode"] == "bitscore"
+
+
+def test_run_invalid_inflation_exits_with_error(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(
+        app,
+        ["run", "-i", str(input_dir), "-o", str(output_dir), "--inflation", "0"],
+    )
+
+    assert result.exit_code != 0
+    assert not output_dir.exists()
+
+
+def test_run_invalid_edge_weight_mode_exits_with_error(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(
+        app,
+        [
+            "run", "-i", str(input_dir), "-o", str(output_dir),
+            "--edge-weight-mode", "bogus",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert not output_dir.exists()
+
+
+def test_run_invalid_edge_weight_alpha_exits_with_error(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(
+        app,
+        [
+            "run", "-i", str(input_dir), "-o", str(output_dir),
+            "--edge-weight-alpha", "1.5",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert not output_dir.exists()

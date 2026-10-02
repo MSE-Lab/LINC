@@ -26,8 +26,15 @@ import typer
 
 from .adapters.aligners.mmseqs_adapter import MMseqsAligner, MMseqsConfig
 from .adapters.aligners.diamond_adapter import DiamondAligner, DiamondConfig
+from .adapters.clustering.mcl_adapter import MCLClustering, MCLConfig
 from .adapters.clustering.union_find_adapter import UnionFindClustering
-from .core.entities import VALID_COV_MODES, VALID_EDGE_COMPLETION_MODES, GenomeStatus
+from .core.entities import (
+    VALID_COV_MODES,
+    VALID_EDGE_COMPLETION_MODES,
+    VALID_EDGE_WEIGHT_MODES,
+    GenomeStatus,
+)
+from .engine.family_refine_stage import FamilyRefineStage
 from .engine.genome_load_stage import (
     GenomeIdConflictError,
     GenomeLoadStage,
@@ -56,6 +63,15 @@ def _setup_logging(verbose: bool) -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         stream=sys.stdout,
     )
+
+
+def _build_clustering(output_dir: str):
+    """构造 MCLClustering 实例, 独立成函数以便测试通过 monkeypatch 注入假的
+    聚类实现(与 `_build_aligner` 同样的理由: MCLClustering 要求本机已安装
+    系统级 `mcl`, 单测环境不应该强依赖该外部二进制, 2026-10-02)。
+    """
+    mcl_work_dir = os.path.join(output_dir, ".linc_work", "mcl")
+    return MCLClustering(MCLConfig(work_dir=mcl_work_dir))
 
 
 def _build_aligner(aligner_backend: str, threads: int, output_dir: str):
@@ -127,6 +143,33 @@ def _build_ssn_summary(complete_ssn) -> dict:
         "edge_completion_mode": complete_ssn.edge_completion_mode,
         "n_edges": len(complete_ssn.edges),
     }
+
+
+def _build_family_summary(families, inflation: float, edge_weight_mode: str) -> dict:
+    return {
+        "inflation": inflation,
+        "edge_weight_mode": edge_weight_mode,
+        "n_families": len(families),
+        "families": [
+            {
+                "family_id": family.family_id,
+                "component_id": family.component_id,
+                "size": family.size,
+                "edge_density": round(family.edge_density, 4),
+            }
+            for family in families
+        ],
+    }
+
+
+def _write_orthogroups_txt(families, path: str) -> None:
+    """输出 Orthogroups.txt(一行一个 ortholog group): 第一列是 OG 编号,
+    第二列是该家族全部成员基因ID, 用空格分隔(与用户确认, 2026-10-02)。
+    """
+    with open(path, "w", encoding="utf-8") as fh:
+        for family in families:
+            members = " ".join(sorted(family.member_genes))
+            fh.write(f"{family.family_id}\t{members}\n")
 
 
 def _build_intra_summary(intra_results: dict) -> dict:
@@ -206,10 +249,28 @@ def run(
              "成员对数量超过该阈值时, 记录 warning 提醒(不会自动降级或拆分,"
              "流程照常完整执行)。默认不设阈值, 不做任何提醒。",
     ),
+    inflation: float = typer.Option(
+        1.5, "--inflation",
+        help="MCL(Markov Clustering)膨胀参数, 控制亚家族细分的精细程度: "
+             "值越低聚类越粗(更多基因归入同一家族), 值越高聚类越细。需要已"
+             "安装系统级 mcl(推荐: conda install -c bioconda mcl)。",
+    ),
+    edge_weight_mode: str = typer.Option(
+        "identity_x_coverage", "--edge-weight-mode",
+        help="喂给 MCL 的边权重计算方式: identity | coverage | "
+             "identity_x_coverage(默认, identity*coverage) | "
+             "identity_coverage_weighted(alpha*identity+(1-alpha)*coverage,"
+             "配合 --edge-weight-alpha) | bitscore(原始值, 不做归一化)。",
+    ),
+    edge_weight_alpha: float = typer.Option(
+        0.5, "--edge-weight-alpha",
+        help="仅 --edge-weight-mode identity_coverage_weighted 生效: "
+             "identity 的权重系数, coverage 权重为 (1-alpha), 范围 [0, 1]。",
+    ),
     verbose: bool = typer.Option(False, "--verbose", help="输出 DEBUG 级别日志。"),
 ) -> None:
     """运行 LINC 流水线(当前阶段已接通 GenomeLoadStage + IntraGenomeStage +
-    GlobalJoinStage + SSNBuilderStage)。"""
+    GlobalJoinStage + SSNBuilderStage + FamilyRefineStage)。"""
     _setup_logging(verbose)
 
     if not os.path.isdir(input_dir):
@@ -258,6 +319,20 @@ def run(
             fg=typer.colors.RED, err=True,
         )
         raise typer.Exit(code=1)
+    if inflation <= 0:
+        typer.secho(
+            f"--inflation 必须 > 0, 当前为: {inflation}",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+    if edge_weight_mode not in VALID_EDGE_WEIGHT_MODES:
+        typer.secho(
+            f"--edge-weight-mode 取值非法: {edge_weight_mode}"
+            f"(可选: {', '.join(VALID_EDGE_WEIGHT_MODES)})",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+    _validate_cutoff_range("--edge-weight-alpha", edge_weight_alpha)
 
     genome_files = discover_fasta_files(input_dir)
     if not genome_files:
@@ -374,6 +449,31 @@ def run(
         f"共 {ssn_summary['n_edges']} 条边"
     )
     typer.echo(f"摘要已写入: {ssn_summary_path}")
+
+    clustering = _build_clustering(output_dir)
+    family_stage = FamilyRefineStage(
+        clustering=clustering,
+        inflation=inflation,
+        edge_weight_mode=edge_weight_mode,
+        edge_weight_alpha=edge_weight_alpha,
+    )
+    logger.info(
+        "开始MCL亚家族细分(FamilyRefineStage), inflation=%.2f, edge_weight_mode=%s",
+        inflation, edge_weight_mode,
+    )
+    families = family_stage.run(complete_ssn)
+
+    family_summary = _build_family_summary(families, inflation, edge_weight_mode)
+    family_summary_path = os.path.join(output_dir, "family_summary.json")
+    with open(family_summary_path, "w", encoding="utf-8") as fh:
+        json.dump(family_summary, fh, ensure_ascii=False, indent=2)
+
+    orthogroups_path = os.path.join(output_dir, "Orthogroups.txt")
+    _write_orthogroups_txt(families, orthogroups_path)
+
+    typer.echo(f"MCL 亚家族细分完成: 共 {family_summary['n_families']} 个直系同源家族")
+    typer.echo(f"摘要已写入: {family_summary_path}")
+    typer.echo(f"Orthogroups 已写入: {orthogroups_path}")
 
 
 if __name__ == "__main__":
