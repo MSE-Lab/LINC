@@ -194,30 +194,40 @@ class DiamondAligner:
             ) from exc
         return db_path
 
-    def search(self, query: Sequence[Gene], index: Any) -> List[AlignmentResult]:
+    def search(
+        self, query: Sequence[Gene], index: Any, tag: Optional[str] = None
+    ) -> List[AlignmentResult]:
         """用 build_index 建好的持久化 DB(index, target/subject) 对 query 做比对。
 
         diamond 的 query 可直接是 fasta 文件, 不需要像 mmseqs 那样先对 query
         单独建库, 因此这里只需写 query.fasta + 调用一次 blastp。
 
         比对的中间文件(query.fasta/result.tsv)持久化保存在 index 所在的
-        工作目录下(`<index_dir>/search/`), 不自动清理, 与 build_index 的
-        索引一并保留, 贴合断点续跑/增量添加数据的定位(与 mmseqs_adapter
-        保持一致); 以 index 所在目录名(通常是 genome_id)为标识, 重跑
-        同一 genome_id 时直接覆盖旧结果。
+        工作目录下(`<index_dir>/search_<tag>/`, tag 省略时回退为
+        `<index_dir>/search/`), 不自动清理, 与 build_index 的索引一并保留,
+        贴合断点续跑/增量添加数据的定位(与 mmseqs_adapter 保持一致)。
+
+        tag 用于区分"同一个 index 被不同阶段/不同来源反复调用"的场景
+        (2026-10-02 与用户确认, 修复 intra自比对/global join/full模式补边
+        三类调用因共用固定的 `search/` 子目录而互相覆盖彼此中间结果的问题):
+        调用方应传入能唯一标识本次调用性质的 tag(如 "intra_self"/"join"/
+        "full_from_<genome_id>"), 同一 index_dir 下不同 tag 各自独立保存,
+        同一 tag 重跑时直接覆盖旧结果(贴合"同一标识覆盖旧结果"的既有语义)。
         """
         if not query or not index:
             return []
 
         index_dir = os.path.dirname(str(index))
+        subdir_name = f"search_{tag}" if tag else "search"
         if index_dir:
-            tmp_dir = os.path.join(index_dir, "search")
+            tmp_dir = os.path.join(index_dir, subdir_name)
         else:
             tmp_dir = tempfile.mkdtemp(prefix="linc_diamond_search_")
         query_fasta = os.path.join(tmp_dir, "query.fasta")
         result_tsv = os.path.join(tmp_dir, "result.tsv")
-        # 每次重跑先清空旧的 search/ 子目录, 实现"同一标识(index 所在目录名,
-        # 通常是 genome_id)覆盖旧结果"的语义, 与 mmseqs_adapter.search() 一致。
+        # 每次重跑先清空旧的 search_<tag>/ 子目录, 实现"同一标识(tag + index
+        # 所在目录名, 通常是 genome_id)覆盖旧结果"的语义, 与 mmseqs_adapter
+        # .search() 一致。
         shutil.rmtree(tmp_dir, ignore_errors=True)
         os.makedirs(tmp_dir, exist_ok=True)
 

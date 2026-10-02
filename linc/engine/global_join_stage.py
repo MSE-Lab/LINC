@@ -147,7 +147,7 @@ class GlobalJoinStage:
         # 同一份快照结果(处理这个基因组之前的全局库状态)。
         query_genes = global_lib.representative_genes()
         if query_genes and intra.genome_index is not None:
-            hits = self._aligner.search(query_genes, intra.genome_index)
+            hits = self._aligner.search(query_genes, intra.genome_index, tag="join")
         else:
             hits = []
 

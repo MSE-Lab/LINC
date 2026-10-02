@@ -82,7 +82,7 @@ class IntraGenomeStage:
         # GlobalJoinStage 反过来用全局库 query 该索引, 复用而不重新建库
         # (详见 docs/LINC_技术框架设计_v2.md 第2.4节"GlobalJoinStage 性能方案")。
         genome_index = self._aligner.build_index(genes, index_id=genome.genome_id)
-        hits = self._aligner.search(genes, genome_index)
+        hits = self._aligner.search(genes, genome_index, tag="intra_self")
 
         identity_map: _IdentityMap = {}
         pairwise_hits: List[AlignmentResult] = []

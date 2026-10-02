@@ -18,9 +18,12 @@
          而是先遍历全部活跃簇, 按"基因组对"聚合出需要查询的基因集合
          (同一基因组对跨多个簇的 query 基因去重合并), 再对每个基因组对
          只调用一次 AlignerPort.search(复用 IntraGenomeStage 已持久化的
-         genome_index 作为 target, 避免重新建库), 调用次数从
-         O(簇数×基因组对数) 降到 O(基因组对数); search 结果按"双方是否
-         属于同一个簇"过滤, 排除同一基因组对下属于不同簇的无关比对结果。
+         genome_index 作为 target, 避免重新建库; tag=f"full_from_{genome_a}",
+         与 intra 阶段的 tag="intra_self"/join 阶段的 tag="join" 区分开,
+         避免三类调用写入同一个 `search/` 子目录互相覆盖, 2026-10-02 与
+         用户确认), 调用次数从 O(簇数×基因组对数) 降到 O(基因组对数);
+         search 结果按"双方是否属于同一个簇"过滤, 排除同一基因组对下属于
+         不同簇的无关比对结果。
     3. 巨簇处理: 仅做信息提醒(超过 `mega_cluster_warning_threshold` 时记录
        warning), 不做自动降级或拆分 —— 与用户确认(2026-10-02): 任何跳过
        真实比对的"降级"或"拆分"都会让结果偏离"全对全比对"的最初设计目标,
@@ -218,7 +221,9 @@ class SSNBuilderStage:
             intra_b = intra_results.get(genome_b)
             index_b = intra_b.genome_index if intra_b is not None else None
             if index_b is not None:
-                hits = self._aligner.search(query_genes, index_b)
+                hits = self._aligner.search(
+                    query_genes, index_b, tag=f"full_from_{genome_a}"
+                )
             else:
                 # 回退: 没有持久化索引可复用(如测试/某些 adapter 实现),
                 # 退化为一次性的便捷方法调用, 仍然按基因组对聚合, 不逐簇调用。

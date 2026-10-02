@@ -4,14 +4,17 @@
 GlobalJoinStage,后续每接通一个新 Stage,直接在 `run` 命令内部继续往后扩展
 流水线调用,CLI 接口形态本身(`linc run -i <目录> -o <输出目录>`)不再变动。
 
-IntraGenomeStage/GlobalJoinStage 的比对后端可通过 `--backend` 选择(二者共用
+IntraGenomeStage/GlobalJoinStage 的比对后端可通过 `--aligner` 选择(二者共用
 同一个 aligner 实例, 以便 GlobalJoinStage 复用 IntraGenomeStage 阶段已建好的
 持久化索引, 避免重复建库):
-- "mock"(默认, 用于单测/无 mmseqs 环境下打通流程): MockAligner 的长度相似度模式。
-- "mmseqs": 调用系统级 mmseqs2(需要已安装并在 PATH 中, 推荐通过 conda `linc`
-  环境提供), 使用真实序列比对结果。
+- "mmseqs"(默认): 调用系统级 mmseqs2(需要已安装并在 PATH 中, 推荐通过 conda
+  `linc` 环境提供), 使用真实序列比对结果。
 - "diamond": 调用系统级 diamond(需要已安装并在 PATH 中, 推荐通过 conda `linc`
   环境提供), 使用真实序列比对结果。
+
+MockAligner(假比对实现, 不依赖外部二进制程序)仅用于单元测试内部构造
+夹具, 不作为 CLI 可选项暴露(与用户确认, 2026-10-02: 避免用户误以为
+默认在用真实比对, 生产环境运行必须显式使用真实比对后端)。
 """
 import json
 import logging
@@ -21,7 +24,6 @@ from typing import Optional
 
 import typer
 
-from .adapters.aligners.mock_adapter import MockAligner
 from .adapters.aligners.mmseqs_adapter import MMseqsAligner, MMseqsConfig
 from .adapters.aligners.diamond_adapter import DiamondAligner, DiamondConfig
 from .adapters.clustering.union_find_adapter import UnionFindClustering
@@ -54,6 +56,23 @@ def _setup_logging(verbose: bool) -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         stream=sys.stdout,
     )
+
+
+def _build_aligner(aligner_backend: str, threads: int, output_dir: str):
+    """根据 --aligner 取值构造真实比对后端实例。
+
+    独立成函数以便测试通过 monkeypatch 注入 MockAligner(2026-10-02 与用户
+    确认: MockAligner 仅供单测内部构造夹具使用, 不作为 CLI 可选项暴露;
+    test_cli.py 对这类集成测试改为 monkeypatch 本函数, 而不是新增隐藏的
+    CLI 后门参数)。取值非法时返回 None, 由调用方负责报错退出。
+    """
+    if aligner_backend == "mmseqs":
+        work_dir = os.path.join(output_dir, ".linc_work", "mmseqs_db")
+        return MMseqsAligner(MMseqsConfig(threads=threads, work_dir=work_dir))
+    if aligner_backend == "diamond":
+        work_dir = os.path.join(output_dir, ".linc_work", "diamond_db")
+        return DiamondAligner(DiamondConfig(threads=threads, work_dir=work_dir))
+    return None
 
 
 def _validate_cutoff_range(option_name: str, value: float) -> None:
@@ -162,14 +181,14 @@ def run(
     max_per_cluster: int = typer.Option(
         5, "--max-per-cluster", help="单个局部簇最多选取的代表数。"
     ),
-    backend: str = typer.Option(
-        "mock", "--backend",
-        help="比对引擎后端: mock(默认, 无需安装比对工具) | mmseqs(真实比对, 需已"
-             "安装 mmseqs2) | diamond(真实比对, 需已安装 diamond)。",
+    aligner_backend: str = typer.Option(
+        "mmseqs", "--aligner",
+        help="比对引擎后端: mmseqs(默认, 真实比对, 需已安装 mmseqs2) | "
+             "diamond(真实比对, 需已安装 diamond)。",
     ),
     threads: int = typer.Option(
         0, "--threads",
-        help="mmseqs/diamond 使用的线程数(仅 --backend mmseqs|diamond 生效)。"
+        help="mmseqs/diamond 使用的线程数(仅 --aligner mmseqs|diamond 生效)。"
              "0 = 不显式指定, 让工具使用其自身默认的全部核心数(注意: 多线程并行"
              "时结果在极少数边界情况下不保证严格可复现, 如需完全可复现结果请"
              "指定 --threads 1)。",
@@ -278,22 +297,15 @@ def run(
         for genome_id, genome in genomes.items()
         if genome.status == GenomeStatus.LOADED
     }
-    if backend == "mmseqs":
-        work_dir = os.path.join(output_dir, ".linc_work", "mmseqs_db")
-        aligner = MMseqsAligner(MMseqsConfig(threads=threads, work_dir=work_dir))
-    elif backend == "diamond":
-        work_dir = os.path.join(output_dir, ".linc_work", "diamond_db")
-        aligner = DiamondAligner(DiamondConfig(threads=threads, work_dir=work_dir))
-    elif backend == "mock":
-        aligner = MockAligner()
-    else:
+    aligner = _build_aligner(aligner_backend, threads, output_dir)
+    if aligner is None:
         typer.secho(
-            f"未知的 --backend 取值: {backend}(可选: mock | mmseqs | diamond)",
+            f"未知的 --aligner 取值: {aligner_backend}(可选: mmseqs | diamond)",
             fg=typer.colors.RED,
             err=True,
         )
         raise typer.Exit(code=1)
-    logger.info("比对后端: %s", backend)
+    logger.info("比对后端: %s", aligner_backend)
     intra_stage = IntraGenomeStage(
         aligner=aligner,
         clustering=UnionFindClustering(),

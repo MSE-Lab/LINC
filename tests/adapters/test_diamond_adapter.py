@@ -278,6 +278,37 @@ def test_search_overwrites_previous_results_for_same_index_dir(monkeypatch, tmp_
     assert os.path.exists(os.path.join(search_dir, "result.tsv"))
 
 
+def test_search_tag_uses_separate_subdir_and_does_not_overwrite_other_tags(monkeypatch, tmp_path):
+    """不同 tag 的 search 调用应写入各自独立的子目录, 互不覆盖
+    (2026-10-02 与用户确认: 修复 intra自比对/join/full补边三类调用共用
+    固定 `search/` 子目录而互相覆盖彼此中间结果的问题)。
+    """
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/diamond")
+
+    def _fake_run(cmd, check, capture_output, text):
+        result_tsv = cmd[cmd.index("-o") + 1]
+        with open(result_tsv, "w", encoding="utf-8") as fh:
+            fh.write("q1\ts1\t80.0\t0.8\t0.8\t1e-10\t100.0\t50")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    aligner = DiamondAligner(DiamondConfig(work_dir=_tmp_work_dir(tmp_path)))
+    persisted_index = os.path.join(str(tmp_path), "persisted", "db")
+
+    aligner.search([_gene("q1", 10)], persisted_index, tag="full_from_genomeA")
+    aligner.search([_gene("q2", 10)], persisted_index, tag="full_from_genomeC")
+
+    result_a = os.path.join(
+        str(tmp_path), "persisted", "search_full_from_genomeA", "result.tsv"
+    )
+    result_c = os.path.join(
+        str(tmp_path), "persisted", "search_full_from_genomeC", "result.tsv"
+    )
+    assert os.path.exists(result_a)
+    assert os.path.exists(result_c)
+
+
 def test_search_empty_query_or_index_returns_empty_without_calling_subprocess(monkeypatch, tmp_path):
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/diamond")
 

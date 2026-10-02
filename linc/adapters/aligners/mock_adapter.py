@@ -75,6 +75,12 @@ class MockAligner:
         """Mock 场景无需真正建库, 直接以基因列表本身作为"索引" handle。"""
         return list(genes)
 
-    def search(self, query: Sequence[Gene], index: Any) -> List[AlignmentResult]:
-        """用 build_index 返回的基因列表作为 target, 对 query 做笛卡尔积比对。"""
+    def search(
+        self, query: Sequence[Gene], index: Any, tag: Optional[str] = None
+    ) -> List[AlignmentResult]:
+        """用 build_index 返回的基因列表作为 target, 对 query 做笛卡尔积比对。
+
+        tag 仅为满足 AlignerPort 接口签名而接受, Mock 实现不落盘任何中间
+        文件, 因此直接忽略(2026-10-02 与用户确认)。
+        """
         return [self._lookup_or_compute(q, s) for q in query for s in index]

@@ -1,12 +1,25 @@
-"""linc.cli 的 CLI 集成测试(使用 typer.testing.CliRunner)。"""
+"""linc.cli 的 CLI 集成测试(使用 typer.testing.CliRunner)。
+
+本文件全部用例默认通过 autouse fixture 将 `linc.cli._build_aligner` monkeypatch 为
+返回 MockAligner(2026-10-02 与用户确认: MockAligner 不再作为 CLI 可选项暴露,
+不引入隐藏的 --aligner 后门参数, 这类集成测试本意是验证 CLI 参数校验/日志/
+摘要文件格式, 不需要依赖本机安装真实 mmseqs/diamond, 也不需要调用子进程)。"""
 import json
 import os
 
+import pytest
 from typer.testing import CliRunner
 
+import linc.cli as cli_module
+from linc.adapters.aligners.mock_adapter import MockAligner
 from linc.cli import app
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _use_mock_aligner(monkeypatch):
+    monkeypatch.setattr(cli_module, "_build_aligner", lambda *a, **kw: MockAligner())
 
 
 def _write_fasta(path: str, records: list) -> None:
@@ -276,6 +289,36 @@ def test_run_invalid_mega_cluster_warning_threshold_exits_with_error(tmp_path):
             "--mega-cluster-warning-threshold", "0",
         ],
     )
+
+    assert result.exit_code != 0
+    assert not output_dir.exists()
+
+
+def test_run_invalid_aligner_exits_with_error(tmp_path):
+    """--aligner 取值非法(含已移除的 "mock")应报错退出, 不产出任何摘要文件
+    (2026-10-02 与用户确认: mock 不再作为 CLI 可选项暴露; 由于本用例要
+    验证"真实 _build_aligner 对非法取值返回 None"的分支, 这里不使用
+    autouse fixture 注入的 MockAligner, 而是单独 monkeypatch 还原真实
+    _build_aligner 行为)。
+    """
+    import linc.cli as cli_module
+    from linc.cli import _build_aligner
+
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    import pytest as _pytest
+    monkeypatch = _pytest.MonkeyPatch()
+    monkeypatch.setattr(cli_module, "_build_aligner", _build_aligner)
+    try:
+        result = runner.invoke(
+            app,
+            ["run", "-i", str(input_dir), "-o", str(output_dir), "--aligner", "mock"],
+        )
+    finally:
+        monkeypatch.undo()
 
     assert result.exit_code != 0
     assert not output_dir.exists()

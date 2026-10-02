@@ -39,8 +39,17 @@ class AlignerPort(Protocol):
         """
         ...
 
-    def search(self, query: Sequence[Gene], index: Any) -> List[AlignmentResult]:
-        """用已建好的 index(作为 target/subject)对 query 做比对, 不重新建库。"""
+    def search(
+        self, query: Sequence[Gene], index: Any, tag: Optional[str] = None
+    ) -> List[AlignmentResult]:
+        """用已建好的 index(作为 target/subject)对 query 做比对, 不重新建库。
+
+        tag: 可选, 标识本次调用的性质/来源(如 "intra_self"/"join"/
+        "full_from_<genome_id>"), 用于持久化中间文件时区分子目录,
+        避免同一个 index 被不同阶段/不同来源反复调用时互相覆盖彼此的
+        中间结果(2026-10-02 与用户确认)。省略时各 adapter 回退到旧的
+        固定子目录名, 保持向后兼容。
+        """
         ...
 
     def align_all_vs_all(self, genes: Sequence[Gene]) -> List[AlignmentResult]:
