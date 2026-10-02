@@ -39,7 +39,7 @@ from .core.entities import (
     GenomeStatus,
 )
 from .engine.genome_load_stage import GenomeIdConflictError, discover_fasta_files
-from .adapters.storage.memory_repo import MemoryRepository
+from .adapters.storage.file_repo import FileRepository, StateCorruptedError
 from .pipeline import Pipeline, PipelineConfig
 
 app = typer.Typer(help="LINC: 增量基因组比较构建 SSN 并通过 MCL 细分蛋白质家族。")
@@ -198,10 +198,25 @@ def _build_intra_summary(intra_results: dict) -> dict:
 @app.command()
 def run(
     input_dir: str = typer.Option(
-        ..., "-i", "--input-dir", help="包含基因组 FASTA 文件(*.fasta/*.fa/*.faa)的目录。"
+        ..., "-i", "--input-dir",
+        help="包含基因组 FASTA 文件(*.fasta/*.fa/*.faa)的目录。表示历史(首次)"
+             "运行的输入集合; --resume/--append 时必须与历史记录一致"
+             "(按文件名比对), 不可变化。",
     ),
     output_dir: str = typer.Option(
         "output", "-o", "--output-dir", help="输出目录,用于写入运行摘要等结果文件。"
+    ),
+    append_dir: Optional[str] = typer.Option(
+        None, "-a", "--append",
+        help="追加模式: 指定一个包含新基因组 FASTA 文件的目录, 将其追加到"
+             "-o 指向的历史完整结果上(要求 -o 下已存在一次完整运行的结果)。"
+             "可多次追加(每次 -a 指向不同的新目录)。-i 仍须传入且必须与历史"
+             "一致, 不与 --resume 共用。",
+    ),
+    resume: bool = typer.Option(
+        False, "--resume",
+        help="断点续跑: 从 -o 历史中断的 Stage 接着跑完剩余步骤, -i 必须与"
+             "历史一致, 不得同时传入 -a。",
     ),
     cutoff_i: float = typer.Option(
         0.5, "--cutoff-i", help="Cutoff-I(纳入阈值): 判定是否成簇。"
@@ -338,6 +353,17 @@ def run(
             err=True,
         )
         raise typer.Exit(code=1)
+    if resume and append_dir is not None:
+        typer.secho(
+            "--resume 不能与 -a/--append 同时使用: --resume 是接续上次中断的"
+            "运行(不引入新数据), -a 是追加新基因组(要求历史结果已完整), "
+            "二者语义互斥。",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+    if append_dir is not None and not os.path.isdir(append_dir):
+        typer.secho(f"-a/--append 指向的目录不存在: {append_dir}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
 
     genome_files = discover_fasta_files(input_dir)
     if not genome_files:
@@ -357,11 +383,56 @@ def run(
         raise typer.Exit(code=1)
     logger.info("比对后端: %s", aligner_backend)
 
+    state_dir = os.path.join(output_dir, ".linc_work", "state")
+    repository = FileRepository(state_dir)
+
+    if resume or append_dir is not None:
+        try:
+            historical_signature = repository.load_input_signature()
+        except StateCorruptedError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        current_signature = sorted(os.path.basename(f) for f in genome_files)
+        if historical_signature is None:
+            typer.secho(
+                f"-o {output_dir} 下未找到历史运行记录(.linc_work/state), "
+                "--resume/-a 需要先有一次 `linc run` 的历史运行。",
+                fg=typer.colors.RED, err=True,
+            )
+            raise typer.Exit(code=1)
+        if current_signature != historical_signature:
+            typer.secho(
+                f"-i {input_dir} 下发现的基因组文件集合与历史记录不一致"
+                "(--resume/-a 要求 -i 始终指向同一份历史基础数据集, 不允许变化): "
+                f"历史={historical_signature}, 本次={current_signature}",
+                fg=typer.colors.RED, err=True,
+            )
+            raise typer.Exit(code=1)
+
+    if append_dir is not None:
+        missing_stages = [
+            name for name, has in (
+                ("genomes", repository.has_genomes()),
+                ("intra_results", repository.has_intra_results()),
+                ("join_result", repository.has_join_result()),
+                ("complete_ssn", repository.has_complete_ssn()),
+                ("families", repository.has_families()),
+            ) if not has
+        ]
+        if missing_stages:
+            typer.secho(
+                f"-a/--append 要求 -o {output_dir} 下是一次完整运行的结果, "
+                f"但缺少以下 Stage 的历史产出: {', '.join(missing_stages)}; "
+                "请先用 --resume 补全上次运行, 再执行 --append。",
+                fg=typer.colors.RED, err=True,
+            )
+            raise typer.Exit(code=1)
+
     pipeline = Pipeline(
         aligner=aligner,
         clustering_for_intra=UnionFindClustering(),
         clustering_for_mcl=_build_clustering(output_dir),
-        repository=MemoryRepository(),
+        repository=repository,
         config=PipelineConfig(
             cutoff_i=cutoff_i,
             cutoff_ii=cutoff_ii,
@@ -376,10 +447,24 @@ def run(
         ),
     )
 
-    logger.info("开始加载基因组, 共发现 %d 个候选文件", len(genome_files))
     try:
-        result = pipeline.run(genome_files)
+        if append_dir is not None:
+            new_genome_files = discover_fasta_files(append_dir)
+            logger.info(
+                "追加模式(--append): 发现 %d 个新基因组候选文件(目录=%s)",
+                len(new_genome_files), append_dir,
+            )
+            result = pipeline.append(new_genome_files)
+        elif resume:
+            logger.info("断点续跑(--resume): 共 %d 个候选文件", len(genome_files))
+            result = pipeline.resume(genome_files)
+        else:
+            logger.info("开始加载基因组, 共发现 %d 个候选文件", len(genome_files))
+            result = pipeline.run(genome_files)
     except GenomeIdConflictError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    except StateCorruptedError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 

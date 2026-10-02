@@ -96,6 +96,29 @@ def test_empty_file_marks_failed(tmp_path):
     assert genome.genes == []
 
 
+def test_existing_genome_ids_conflict_raises(tmp_path):
+    # 2026-10-02 第8步(--append): 新文件的 genome_id 若与历史(existing_genome_ids)
+    # 冲突, 应同样视为无法自行消歧的歧义, 直接中断。
+    file_path = tmp_path / "genome01.faa"
+    _write_fasta(str(file_path), [("g1", "MK")])
+
+    stage = GenomeLoadStage()
+    with pytest.raises(GenomeIdConflictError) as exc_info:
+        stage.run([str(file_path)], existing_genome_ids={"genome01"})
+
+    assert "genome01" in exc_info.value.conflicts
+
+
+def test_existing_genome_ids_no_conflict_succeeds(tmp_path):
+    file_path = tmp_path / "genome02.faa"
+    _write_fasta(str(file_path), [("g1", "MK")])
+
+    stage = GenomeLoadStage()
+    result = stage.run([str(file_path)], existing_genome_ids={"genome01"})
+
+    assert "genome02" in result
+
+
 def test_one_failed_genome_does_not_block_others(tmp_path):
     good_path = tmp_path / "good.faa"
     _write_fasta(str(good_path), [("g1", "MK")])

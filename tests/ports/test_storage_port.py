@@ -19,6 +19,7 @@ class FakeRepository:
         self._join_result: Optional[IncrementalResult] = None
         self._complete_ssn: Optional[CompleteSSN] = None
         self._families: List[OrthologFamily] = []
+        self._input_signature: Optional[List[str]] = None
 
     def save_genomes(self, genomes):
         self._genomes = genomes
@@ -49,6 +50,27 @@ class FakeRepository:
 
     def load_families(self):
         return self._families
+
+    def has_genomes(self):
+        return bool(self._genomes)
+
+    def has_intra_results(self):
+        return bool(self._intra_results)
+
+    def has_join_result(self):
+        return self._join_result is not None
+
+    def has_complete_ssn(self):
+        return self._complete_ssn is not None
+
+    def has_families(self):
+        return bool(self._families)
+
+    def save_input_signature(self, file_names):
+        self._input_signature = list(file_names)
+
+    def load_input_signature(self):
+        return self._input_signature
 
 
 def test_fake_repository_satisfies_protocol_via_isinstance():
@@ -93,6 +115,13 @@ def test_families_roundtrip():
     family = OrthologFamily(family_id="OG0000000", component_id=0, member_genes={"g1|1"})
     repo.save_families([family])
     assert repo.load_families() == [family]
+
+
+def test_input_signature_roundtrip():
+    repo: RepositoryPort = FakeRepository()
+    assert repo.load_input_signature() is None
+    repo.save_input_signature(["a.faa", "b.faa"])
+    assert repo.load_input_signature() == ["a.faa", "b.faa"]
 
 
 def test_incomplete_implementation_fails_isinstance_check():

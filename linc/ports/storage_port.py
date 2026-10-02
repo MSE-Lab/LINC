@@ -3,10 +3,21 @@
 设计依据: docs/LINC_技术框架设计_v2.md 第 2.2 节, 并于第5步(pipeline打通)
 与用户确认重新设计: 接口按 engine/ 五个 Stage 的实际产出类型逐一对应提供
 save/load 方法(而非早期版本里粗粒度的 checkpoint/global_library/ssn_edges),
-使 `Pipeline` 在每个 Stage 跑完后可以直接、类型安全地做存取, 也为未来
-adapters/storage/sqlite_repo.py(第8步持久化+断点续跑)实现同一接口打好基础。
+使 `Pipeline` 在每个 Stage 跑完后可以直接、类型安全地做存取。
 
-具体实现见 adapters/storage/memory_repo.py(纯内存, 不支持跨进程恢复)。
+第8步(2026-10-02, 持久化存储 + Checkpoint/Resume + --append)与用户确认:
+不采用 sqlite, 改用基于文件(pickle)的持久化, 数据统一存放在 `.linc_work/
+state/` 下(与现有 `.linc_work/mmseqs_db` 等索引目录风格一致)。为支持
+`--resume`/`--append` 的核验逻辑, 本接口新增:
+- `has_*()` 系列: 精确判断某个 Stage 的产出是否已被持久化保存过(不能仅靠
+  `load_*()` 返回空集合/None 来判断, 因为空结果本身也可能是合法产出);
+- `save_input_signature`/`load_input_signature`: 保存/加载本次(或历史)
+  `-i` 参数对应目录下 discover 出的基因组文件名集合, 供 `--resume`/
+  `--append` 校验 `-i` 是否与历史一致(按文件名集合比较, 而非路径字符串,
+  更鲁棒)。
+
+具体实现见 adapters/storage/memory_repo.py(纯内存, 不支持跨进程恢复)与
+adapters/storage/file_repo.py(基于 pickle 文件, 支持跨进程 resume/append)。
 """
 from typing import Dict, List, Optional, Protocol, runtime_checkable
 
@@ -55,4 +66,32 @@ class RepositoryPort(Protocol):
 
     def load_families(self) -> List[OrthologFamily]:
         """加载 FamilyRefineStage 产出, 不存在则返回空列表。"""
+        ...
+
+    def has_genomes(self) -> bool:
+        """GenomeLoadStage 产出是否已被保存过(区别于"保存过但为空")。"""
+        ...
+
+    def has_intra_results(self) -> bool:
+        """IntraGenomeStage 产出是否已被保存过。"""
+        ...
+
+    def has_join_result(self) -> bool:
+        """GlobalJoinStage 产出是否已被保存过。"""
+        ...
+
+    def has_complete_ssn(self) -> bool:
+        """SSNBuilderStage 产出是否已被保存过。"""
+        ...
+
+    def has_families(self) -> bool:
+        """FamilyRefineStage 产出是否已被保存过。"""
+        ...
+
+    def save_input_signature(self, file_names: List[str]) -> None:
+        """保存 `-i` 对应目录 discover 出的基因组文件名集合(已排序)。"""
+        ...
+
+    def load_input_signature(self) -> Optional[List[str]]:
+        """加载历史保存的 `-i` 文件名集合, 不存在则返回 None。"""
         ...

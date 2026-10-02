@@ -23,33 +23,65 @@ class MemoryRepository:
         self._join_result: Optional[IncrementalResult] = None
         self._complete_ssn: Optional[CompleteSSN] = None
         self._families: List[OrthologFamily] = []
+        self._has_genomes = False
+        self._has_intra_results = False
+        self._has_join_result = False
+        self._has_complete_ssn = False
+        self._has_families = False
+        self._input_signature: Optional[List[str]] = None
 
     def save_genomes(self, genomes: Dict[str, Genome]) -> None:
         self._genomes = copy.deepcopy(genomes)
+        self._has_genomes = True
 
     def load_genomes(self) -> Dict[str, Genome]:
         return copy.deepcopy(self._genomes)
 
     def save_intra_results(self, results: Dict[str, GenomeIntraResult]) -> None:
         self._intra_results = copy.deepcopy(results)
+        self._has_intra_results = True
 
     def load_intra_results(self) -> Dict[str, GenomeIntraResult]:
         return copy.deepcopy(self._intra_results)
 
     def save_join_result(self, result: IncrementalResult) -> None:
         self._join_result = copy.deepcopy(result)
+        self._has_join_result = True
 
     def load_join_result(self) -> Optional[IncrementalResult]:
         return copy.deepcopy(self._join_result) if self._join_result is not None else None
 
     def save_complete_ssn(self, ssn: CompleteSSN) -> None:
         self._complete_ssn = copy.deepcopy(ssn)
+        self._has_complete_ssn = True
 
     def load_complete_ssn(self) -> Optional[CompleteSSN]:
         return copy.deepcopy(self._complete_ssn) if self._complete_ssn is not None else None
 
     def save_families(self, families: List[OrthologFamily]) -> None:
         self._families = copy.deepcopy(families)
+        self._has_families = True
 
     def load_families(self) -> List[OrthologFamily]:
         return copy.deepcopy(self._families)
+
+    def has_genomes(self) -> bool:
+        return self._has_genomes
+
+    def has_intra_results(self) -> bool:
+        return self._has_intra_results
+
+    def has_join_result(self) -> bool:
+        return self._has_join_result
+
+    def has_complete_ssn(self) -> bool:
+        return self._has_complete_ssn
+
+    def has_families(self) -> bool:
+        return self._has_families
+
+    def save_input_signature(self, file_names: List[str]) -> None:
+        self._input_signature = list(file_names)
+
+    def load_input_signature(self) -> Optional[List[str]]:
+        return list(self._input_signature) if self._input_signature is not None else None

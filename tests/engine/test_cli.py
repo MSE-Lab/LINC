@@ -460,3 +460,162 @@ def test_run_invalid_edge_weight_alpha_exits_with_error(tmp_path):
 
     assert result.exit_code != 0
     assert not output_dir.exists()
+
+
+# ---- 第8步(2026-10-02): --resume / -a/--append 持久化相关测试 ----
+
+def test_run_resume_and_append_together_exits_with_error(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    append_dir = tmp_path / "append"
+    append_dir.mkdir()
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(
+        app,
+        [
+            "run", "-i", str(input_dir), "-o", str(output_dir),
+            "--resume", "-a", str(append_dir),
+        ],
+    )
+
+    assert result.exit_code != 0
+
+
+def test_run_resume_without_prior_run_exits_with_error(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(
+        app, ["run", "-i", str(input_dir), "-o", str(output_dir), "--resume"],
+    )
+
+    assert result.exit_code != 0
+
+
+def test_run_resume_after_full_run_succeeds_and_matches(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV"), ("g2", "MKL")])
+    output_dir = tmp_path / "out"
+
+    first = runner.invoke(app, ["run", "-i", str(input_dir), "-o", str(output_dir)])
+    assert first.exit_code == 0
+
+    second = runner.invoke(
+        app, ["run", "-i", str(input_dir), "-o", str(output_dir), "--resume"],
+    )
+    assert second.exit_code == 0
+
+    join_summary = json.loads((output_dir / "join_summary.json").read_text(encoding="utf-8"))
+    assert join_summary["n_clusters_final"] >= 1
+
+
+def test_run_resume_with_mismatched_input_dir_exits_with_error(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    first = runner.invoke(app, ["run", "-i", str(input_dir), "-o", str(output_dir)])
+    assert first.exit_code == 0
+
+    other_input_dir = tmp_path / "genomes2"
+    other_input_dir.mkdir()
+    _write_fasta(str(other_input_dir / "genome02.faa"), [("g1", "MKV")])
+
+    result = runner.invoke(
+        app, ["run", "-i", str(other_input_dir), "-o", str(output_dir), "--resume"],
+    )
+    assert result.exit_code != 0
+    assert "历史" in result.stdout or "历史" in (result.stderr or "")
+
+
+def test_run_append_nonexistent_dir_exits_with_error(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(
+        app,
+        [
+            "run", "-i", str(input_dir), "-o", str(output_dir),
+            "-a", str(tmp_path / "does_not_exist"),
+        ],
+    )
+    assert result.exit_code != 0
+
+
+def test_run_append_without_complete_prior_state_exits_with_error(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    first = runner.invoke(app, ["run", "-i", str(input_dir), "-o", str(output_dir)])
+    assert first.exit_code == 0
+
+    # 人为破坏一个 Stage 的历史产出, 模拟"上次运行未完整结束"
+    families_path = output_dir / ".linc_work" / "state" / "families.pkl"
+    assert families_path.exists()
+    families_path.unlink()
+
+    append_dir = tmp_path / "append"
+    append_dir.mkdir()
+    _write_fasta(str(append_dir / "genome02.faa"), [("g2", "MKV")])
+
+    result = runner.invoke(
+        app, ["run", "-i", str(input_dir), "-o", str(output_dir), "-a", str(append_dir)],
+    )
+    assert result.exit_code != 0
+    assert "families" in result.stdout or "families" in (result.stderr or "")
+
+
+def test_run_append_adds_new_genome_to_existing_result(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV"), ("g2", "MKL")])
+    output_dir = tmp_path / "out"
+
+    first = runner.invoke(app, ["run", "-i", str(input_dir), "-o", str(output_dir)])
+    assert first.exit_code == 0
+    first_load_summary = json.loads((output_dir / "load_summary.json").read_text(encoding="utf-8"))
+    assert first_load_summary["total_genomes"] == 1
+
+    append_dir = tmp_path / "append"
+    append_dir.mkdir()
+    _write_fasta(str(append_dir / "genome02.faa"), [("g3", "MKV")])
+
+    result = runner.invoke(
+        app, ["run", "-i", str(input_dir), "-o", str(output_dir), "-a", str(append_dir)],
+    )
+
+    assert result.exit_code == 0
+    load_summary = json.loads((output_dir / "load_summary.json").read_text(encoding="utf-8"))
+    assert load_summary["total_genomes"] == 2
+    assert "genome01" in load_summary["genomes"]
+    assert "genome02" in load_summary["genomes"]
+
+
+def test_run_append_conflicting_genome_id_exits_with_error(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    first = runner.invoke(app, ["run", "-i", str(input_dir), "-o", str(output_dir)])
+    assert first.exit_code == 0
+
+    append_dir = tmp_path / "append"
+    append_dir.mkdir()
+    # 与历史 genome01 同名(genome_id 冲突)
+    _write_fasta(str(append_dir / "genome01.faa"), [("g2", "MKL")])
+
+    result = runner.invoke(
+        app, ["run", "-i", str(input_dir), "-o", str(output_dir), "-a", str(append_dir)],
+    )
+    assert result.exit_code != 0

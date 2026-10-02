@@ -69,12 +69,22 @@ class GlobalJoinStage:
         self,
         genomes: Dict[str, Genome],
         intra_results: Dict[str, GenomeIntraResult],
+        initial_global_lib: Optional[GlobalRepresentativeLibrary] = None,
+        initial_ssn_edges: Optional[set] = None,
+        initial_cluster_counter: int = 0,
     ) -> IncrementalResult:
+        """
+        `initial_global_lib`/`initial_ssn_edges`/`initial_cluster_counter`
+        (2026-10-02, 第8步 `--append` 设计): 若传入, 本次运行将在历史全局库
+        基础上继续处理 `genomes`/`intra_results`(通常仅为新追加的基因组),
+        而不是从空库开始; 省略时保持原有行为(从空库开始, 向后兼容)。
+        """
         order = self._order_d_sort(intra_results)
         logger.info("Order-D 排序结果: %s", order)
 
-        global_lib = GlobalRepresentativeLibrary()
-        ssn_edges = set()
+        global_lib = initial_global_lib if initial_global_lib is not None else GlobalRepresentativeLibrary()
+        ssn_edges = set(initial_ssn_edges) if initial_ssn_edges is not None else set()
+        self._cluster_counter = initial_cluster_counter
         total = len(order)
 
         for idx, genome_id in enumerate(order, start=1):
@@ -110,6 +120,7 @@ class GlobalJoinStage:
             processing_order=order,
             n_clusters_final=global_lib.n_active_clusters,
             n_representatives_final=global_lib.n_representatives,
+            cluster_counter=self._cluster_counter,
         )
         logger.info(
             "GlobalJoinStage 完成: genomes=%d n_clusters_final=%d "

@@ -19,7 +19,7 @@ import glob
 import logging
 import os
 from collections import defaultdict
-from typing import Dict, Iterator, List, Tuple
+from typing import Dict, Iterator, List, Optional, Set, Tuple
 
 from ..core.entities import Gene, Genome, GenomeStatus
 
@@ -112,14 +112,23 @@ def _parse_fasta(file_path: str) -> Iterator[Tuple[str, str]]:
 class GenomeLoadStage:
     """对应 v1 Step1 的现代化实现。"""
 
-    def run(self, genome_files: List[str]) -> Dict[str, Genome]:
+    def run(
+        self,
+        genome_files: List[str],
+        existing_genome_ids: Optional[Set[str]] = None,
+    ) -> Dict[str, Genome]:
         """解析一批 FASTA 文件,返回 genome_id -> Genome 映射。
 
         genome_id 取文件名去掉扩展名(如 genome01.faa -> genome01)。
         gene_id 格式为 "{genome_id}|{local_id}",local_id 为基因在文件中的
         序号(从 1 开始),不使用 FASTA header 原文本作为 ID。
+
+        `existing_genome_ids`(2026-10-02, 第8步 `--append` 设计): 若传入,
+        表示历史(此前已完整运行过)已存在的 genome_id 集合; 本次新文件解析
+        出的 genome_id 若与历史集合冲突, 同样视为无法自行消歧的歧义, 直接
+        中断(与本次新文件之间互相重名的处理方式一致)。
         """
-        self._check_genome_id_conflicts(genome_files)
+        self._check_genome_id_conflicts(genome_files, existing_genome_ids)
         result: Dict[str, Genome] = {}
         for file_path in genome_files:
             genome_id = self._extract_genome_id(file_path)
@@ -128,7 +137,11 @@ class GenomeLoadStage:
         self._log_summary(result)
         return result
 
-    def _check_genome_id_conflicts(self, genome_files: List[str]) -> None:
+    def _check_genome_id_conflicts(
+        self,
+        genome_files: List[str],
+        existing_genome_ids: Optional[Set[str]] = None,
+    ) -> None:
         """检测 genome_id(文件名 stem)重名, 一旦发现立即中断整个流程。
 
         与单文件解析失败(不存在/为空/格式异常)不同, genome_id 冲突不是
@@ -144,6 +157,10 @@ class GenomeLoadStage:
             for genome_id, paths in files_by_genome_id.items()
             if len(paths) > 1
         }
+        if existing_genome_ids:
+            for genome_id, paths in files_by_genome_id.items():
+                if genome_id in existing_genome_ids:
+                    conflicts[genome_id] = conflicts.get(genome_id, []) + paths + ["<历史已存在>"]
         if conflicts:
             logger.error("检测到重名的 genome_id, 中断加载: %s", conflicts)
             raise GenomeIdConflictError(conflicts)

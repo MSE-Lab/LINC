@@ -49,6 +49,46 @@ def _stage(
     )
 
 
+def test_initial_cluster_counter_is_respected_for_new_cluster_ids():
+    # 2026-10-02 第8步(--append): initial_cluster_counter 传入非0值时,
+    # 本次运行产生的新 cluster_id 应从该值接续, 不从0重新开始。
+    g1 = _gene("g1", 1)
+    genome, intra = _make_genome_and_intra("g1", [g1], [g1.gene_id])
+
+    result = _stage(MockAligner()).run(
+        {"g1": genome}, {"g1": intra}, initial_cluster_counter=7,
+    )
+
+    assert result.n_clusters_final == 1
+    assert result.cluster_counter >= 7
+    [cluster] = [c for c in result.global_lib.clusters if c.active]
+    assert cluster.cluster_id == "global|cluster_7"
+
+
+def test_initial_global_lib_is_extended_not_replaced():
+    # 2026-10-02 第8步(--append): 传入历史 initial_global_lib 时, 新基因组
+    # 应在该历史库基础上继续并入, 而不是从空库重新开始(历史簇应保留)。
+    from linc.core.entities import GlobalRepresentativeLibrary
+
+    historical_lib = GlobalRepresentativeLibrary()
+    historical_rep = _gene("old_genome", 1, length=999)
+    historical_lib.add_new_cluster("global|cluster_0", historical_rep)
+
+    new_gene = _gene("g1", 1, length=10)
+    genome, intra = _make_genome_and_intra("g1", [new_gene], [new_gene.gene_id])
+
+    result = _stage(MockAligner()).run(
+        {"g1": genome}, {"g1": intra},
+        initial_global_lib=historical_lib,
+        initial_cluster_counter=1,
+    )
+
+    # 历史簇应仍然存在(未被从空库重新开始覆盖), 外加新基因组产生的簇。
+    active_cluster_ids = {c.cluster_id for c in result.global_lib.clusters if c.active}
+    assert "global|cluster_0" in active_cluster_ids
+    assert result.n_clusters_final == 2
+
+
 def test_single_genome_single_representative_creates_one_cluster():
     g1 = _gene("g1", 1)
     genome, intra = _make_genome_and_intra("g1", [g1], [g1.gene_id])

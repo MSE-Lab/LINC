@@ -342,13 +342,20 @@ class GlobalRepresentativeLibrary:
 
 @dataclass
 class IncrementalResult:
-    """Step3(增量并入全局代表库)的最终输出。"""
+    """Step3(增量并入全局代表库)的最终输出。
+
+    `cluster_counter`(2026-10-02, 第8步持久化/--append 设计): 记录本次运行
+    结束时 `GlobalJoinStage._cluster_counter` 的当前值, 供下一次 `--append`
+    时作为 `initial_cluster_counter` 传入, 使新基因组产生的 cluster_id 能
+    接续历史编号, 不与历史簇冲突。
+    """
 
     global_lib: GlobalRepresentativeLibrary = field(default_factory=GlobalRepresentativeLibrary)
     ssn_edges: Set["SSNEdge"] = field(default_factory=set)
     processing_order: List[str] = field(default_factory=list)
     n_clusters_final: int = 0
     n_representatives_final: int = 0
+    cluster_counter: int = 0
 
 
 # 补边模式(Step4+5 合并, SSNBuilderStage, 与用户确认, 2026-10-02):
