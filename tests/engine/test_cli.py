@@ -58,6 +58,41 @@ def test_run_reports_failed_genomes_without_crashing(tmp_path):
     assert summary["failed_genome_ids"] == ["empty"]
 
 
+def test_run_cutoff_i_greater_than_cutoff_ii_exits_with_error(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(
+        app,
+        [
+            "run", "-i", str(input_dir), "-o", str(output_dir),
+            "--cutoff-i", "0.9", "--cutoff-ii", "0.5",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert not output_dir.exists()
+
+
+def test_run_cutoff_i_equal_to_cutoff_ii_is_allowed(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(
+        app,
+        [
+            "run", "-i", str(input_dir), "-o", str(output_dir),
+            "--cutoff-i", "0.5", "--cutoff-ii", "0.5",
+        ],
+    )
+
+    assert result.exit_code == 0
+
+
 def test_run_nonexistent_input_dir_exits_with_error(tmp_path):
     missing_dir = str(tmp_path / "does_not_exist")
     output_dir = tmp_path / "out"

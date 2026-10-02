@@ -176,6 +176,14 @@ def run(
     _validate_cutoff_range("--cutoff-i", cutoff_i)
     _validate_cutoff_range("--cutoff-ii", cutoff_ii)
     _validate_cutoff_range("--cutoff-c", cutoff_c)
+    if cutoff_i > cutoff_ii:
+        typer.secho(
+            f"--cutoff-i 不应大于 --cutoff-ii(当前 cutoff_i={cutoff_i}, "
+            f"cutoff_ii={cutoff_ii}): cutoff_ii 是更高置信的阈值, "
+            "若 cutoff_i > cutoff_ii 会产出语义错乱的结果。",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
     if cov_mode not in VALID_COV_MODES:
         typer.secho(
             f"--cov-mode 取值非法: {cov_mode}(可选: {', '.join(str(m) for m in VALID_COV_MODES)})",
