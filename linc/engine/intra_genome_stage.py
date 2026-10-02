@@ -82,7 +82,10 @@ class IntraGenomeStage:
         # GlobalJoinStage 反过来用全局库 query 该索引, 复用而不重新建库
         # (详见 docs/LINC_技术框架设计_v2.md 第2.4节"GlobalJoinStage 性能方案")。
         genome_index = self._aligner.build_index(genes, index_id=genome.genome_id)
-        hits = self._aligner.search(genes, genome_index, tag="intra_self")
+        # self_search=True(2026-10-02, 方案3, 与用户确认): query 就是
+        # genome_index 对应的同一份 genes, 让 aligner 直接复用已持久化的
+        # genes.fasta/索引, 不再重复写一份内容完全相同的 query.fasta。
+        hits = self._aligner.search(genes, genome_index, tag="intra_self", self_search=True)
 
         identity_map: _IdentityMap = {}
         pairwise_hits: List[AlignmentResult] = []

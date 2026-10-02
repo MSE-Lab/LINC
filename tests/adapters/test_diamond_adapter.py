@@ -325,6 +325,45 @@ def test_search_tag_uses_separate_subdir_and_does_not_overwrite_other_tags(monke
     assert os.path.exists(result_c)
 
 
+def test_search_self_search_reuses_genes_fasta_without_rewriting_query(monkeypatch, tmp_path):
+    """self_search=True(2026-10-02, 方案3, 与用户确认): query 与 index 为同一份
+    序列集合(IntraGenomeStage 自比对场景)时, 应直接复用 build_index 已写好的
+    genes.fasta 作为 blastp 的查询输入, 不再重新写一份内容100%重复的
+    query.fasta。
+    """
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/diamond")
+    calls = []
+
+    def _fake_run(cmd, check, capture_output, text):
+        calls.append(cmd)
+        result_tsv = cmd[cmd.index("-o") + 1]
+        with open(result_tsv, "w", encoding="utf-8") as fh:
+            fh.write("q1\tq1\t100.0\t1.0\t1.0\t0.0\t100.0\t50\t10\t10")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    aligner = DiamondAligner(DiamondConfig(work_dir=_tmp_work_dir(tmp_path)))
+    index_dir = os.path.join(str(tmp_path), "persisted")
+    os.makedirs(index_dir, exist_ok=True)
+    genes_fasta = os.path.join(index_dir, "genes.fasta")
+    with open(genes_fasta, "w", encoding="utf-8") as fh:
+        fh.write(">q1\nMMMMMMMMMM\n")
+    persisted_index = os.path.join(index_dir, "db")
+
+    aligner.search(
+        [_gene("q1", 10)], persisted_index, tag="intra_self", self_search=True
+    )
+
+    assert len(calls) == 1
+    # blastp 的 -q 应直接指向已存在的 genes.fasta, 而非新建的 query.fasta。
+    assert calls[0][calls[0].index("-q") + 1] == genes_fasta
+    assert not os.path.exists(
+        os.path.join(index_dir, "search_intra_self", "query.fasta")
+    )
+    assert os.path.exists(os.path.join(index_dir, "search_intra_self", "result.tsv"))
+
+
 def test_search_empty_query_or_index_returns_empty_without_calling_subprocess(monkeypatch, tmp_path):
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/diamond")
 

@@ -204,7 +204,11 @@ class MMseqsAligner:
         return db_path
 
     def search(
-        self, query: Sequence[Gene], index: Any, tag: Optional[str] = None
+        self,
+        query: Sequence[Gene],
+        index: Any,
+        tag: Optional[str] = None,
+        self_search: bool = False,
     ) -> List[AlignmentResult]:
         """用 build_index 建好的持久化 DB(index, target/subject) 对 query 做比对。
 
@@ -222,6 +226,12 @@ class MMseqsAligner:
         调用方应传入能唯一标识本次调用性质的 tag(如 "intra_self"/"join"/
         "full_from_<genome_id>"), 同一 index_dir 下不同 tag 各自独立保存,
         同一 tag 重跑时直接覆盖旧结果(贴合"同一标识覆盖旧结果"的既有语义)。
+
+        self_search: 当 query 与 index 对应同一份序列集合时(IntraGenomeStage
+        基因组内自比对)置为 True(2026-10-02 与用户确认, 方案3): 跳过为
+        query 重新写 fasta + createdb 这两步, 直接复用 index 本身同时作为
+        query_db 和 target db, 避免 genes.fasta 与 query.fasta 内容
+        100%重复落盘, 并省去一次 createdb 子进程调用。
         """
         if not query or not index:
             return []
@@ -232,8 +242,6 @@ class MMseqsAligner:
             tmp_dir = os.path.join(index_dir, subdir_name)
         else:
             tmp_dir = tempfile.mkdtemp(prefix="linc_mmseqs_search_")
-        query_fasta = os.path.join(tmp_dir, "query.fasta")
-        query_db = os.path.join(tmp_dir, "query_db")
         result_db = os.path.join(tmp_dir, "result_db")
         result_tsv = os.path.join(tmp_dir, "result.tsv")
         work_dir = os.path.join(tmp_dir, "tmp")
@@ -243,9 +251,18 @@ class MMseqsAligner:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         os.makedirs(work_dir, exist_ok=True)
 
-        self._write_fasta(query, query_fasta)
+        cmds: List[List[str]] = []
+        if self_search:
+            # query 与 index 是同一份序列集合: 直接把 index 本身当作
+            # query_db, 不再重新写 query.fasta / createdb(2026-10-02,
+            # 方案3, 与用户确认)。
+            query_db = index
+        else:
+            query_fasta = os.path.join(tmp_dir, "query.fasta")
+            query_db = os.path.join(tmp_dir, "query_db")
+            self._write_fasta(query, query_fasta)
+            cmds.append(["mmseqs", "createdb", query_fasta, query_db, "-v", "1"])
 
-        create_cmd = ["mmseqs", "createdb", query_fasta, query_db, "-v", "1"]
         search_cmd = [
             "mmseqs", "search", query_db, index, result_db, work_dir,
             "-s", str(self._config.sensitivity),
@@ -260,8 +277,9 @@ class MMseqsAligner:
             "--format-output", _FORMAT_OUTPUT,
             "-v", "1",
         ]
+        cmds += [search_cmd, convert_cmd]
 
-        for cmd in (create_cmd, search_cmd, convert_cmd):
+        for cmd in cmds:
             logger.debug("调用 mmseqs: %s", " ".join(cmd))
             try:
                 subprocess.run(cmd, check=True, capture_output=True, text=True)

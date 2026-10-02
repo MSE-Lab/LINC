@@ -319,6 +319,47 @@ def test_search_tag_uses_separate_subdir_and_does_not_overwrite_other_tags(monke
     assert os.path.exists(join_result)
 
 
+def test_search_self_search_skips_query_fasta_and_createdb(monkeypatch, tmp_path):
+    """self_search=True(2026-10-02, 方案3, 与用户确认): query 与 index 为同一份
+    序列集合(IntraGenomeStage 自比对场景)时, 应跳过为 query 重新写 fasta/
+    createdb, 直接复用 index 本身作为 query_db, 避免 genes.fasta 与
+    query.fasta 内容100%重复落盘。
+    """
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
+    calls = []
+
+    def _fake_run(cmd, check, capture_output, text):
+        calls.append(cmd)
+        if cmd[1] == "convertalis":
+            result_tsv = cmd[5]
+            with open(result_tsv, "w", encoding="utf-8") as fh:
+                fh.write("q1\tq1\t100.0\t1.0\t1.0\t0.0\t100.0\t50\t10\t10")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    aligner = MMseqsAligner(MMseqsConfig(work_dir=_tmp_work_dir(tmp_path)))
+    persisted_index = os.path.join(str(tmp_path), "persisted", "db")
+
+    aligner.search(
+        [_gene("q1", 10)], persisted_index, tag="intra_self", self_search=True
+    )
+
+    sub_commands = [c[1] for c in calls]
+    # 不应再调用 createdb(query 复用 index, 不重新建库)。
+    assert sub_commands == ["search", "convertalis"]
+    # search/convertalis 的 query_db 参数应直接是 index 路径本身。
+    assert calls[0][2] == persisted_index
+    assert calls[1][2] == persisted_index
+    # 不应写入一份内容重复的 query.fasta。
+    assert not os.path.exists(
+        os.path.join(str(tmp_path), "persisted", "search_intra_self", "query.fasta")
+    )
+    assert os.path.exists(
+        os.path.join(str(tmp_path), "persisted", "search_intra_self", "result.tsv")
+    )
+
+
 def test_search_empty_query_or_index_returns_empty_without_calling_subprocess(monkeypatch, tmp_path):
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
 

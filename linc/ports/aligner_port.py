@@ -40,7 +40,11 @@ class AlignerPort(Protocol):
         ...
 
     def search(
-        self, query: Sequence[Gene], index: Any, tag: Optional[str] = None
+        self,
+        query: Sequence[Gene],
+        index: Any,
+        tag: Optional[str] = None,
+        self_search: bool = False,
     ) -> List[AlignmentResult]:
         """用已建好的 index(作为 target/subject)对 query 做比对, 不重新建库。
 
@@ -49,6 +53,14 @@ class AlignerPort(Protocol):
         避免同一个 index 被不同阶段/不同来源反复调用时互相覆盖彼此的
         中间结果(2026-10-02 与用户确认)。省略时各 adapter 回退到旧的
         固定子目录名, 保持向后兼容。
+
+        self_search: 可选, 当调用方明确告知"本次 query 就是 index 对应的
+        同一份序列集合"(典型场景: IntraGenomeStage 的基因组内自比对)时
+        置为 True(2026-10-02 与用户确认, 方案3)。此时实现应直接复用
+        build_index 已经持久化的序列/数据库, 不再为 query 重新写入
+        fasta/重新建库, 既节省磁盘(避免 genes.fasta 与 query.fasta 内容
+        100%重复)也节省一次建库子进程调用。默认 False 保持向后兼容
+        (query 与 index 来自不同序列集合的常规场景)。
         """
         ...
 

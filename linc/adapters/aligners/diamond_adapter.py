@@ -199,7 +199,11 @@ class DiamondAligner:
         return db_path
 
     def search(
-        self, query: Sequence[Gene], index: Any, tag: Optional[str] = None
+        self,
+        query: Sequence[Gene],
+        index: Any,
+        tag: Optional[str] = None,
+        self_search: bool = False,
     ) -> List[AlignmentResult]:
         """用 build_index 建好的持久化 DB(index, target/subject) 对 query 做比对。
 
@@ -217,6 +221,12 @@ class DiamondAligner:
         调用方应传入能唯一标识本次调用性质的 tag(如 "intra_self"/"join"/
         "full_from_<genome_id>"), 同一 index_dir 下不同 tag 各自独立保存,
         同一 tag 重跑时直接覆盖旧结果(贴合"同一标识覆盖旧结果"的既有语义)。
+
+        self_search: 当 query 与 index 对应同一份序列集合时(IntraGenomeStage
+        基因组内自比对)置为 True(2026-10-02 与用户确认, 方案3): 跳过重新
+        写 query.fasta, 直接复用 build_index 时已经写在 index 同目录下的
+        `genes.fasta` 作为 blastp 的查询输入, 避免与 genes.fasta 内容
+        100%重复的 query.fasta 再落盘一份。
         """
         if not query or not index:
             return []
@@ -227,7 +237,6 @@ class DiamondAligner:
             tmp_dir = os.path.join(index_dir, subdir_name)
         else:
             tmp_dir = tempfile.mkdtemp(prefix="linc_diamond_search_")
-        query_fasta = os.path.join(tmp_dir, "query.fasta")
         result_tsv = os.path.join(tmp_dir, "result.tsv")
         # 每次重跑先清空旧的 search_<tag>/ 子目录, 实现"同一标识(tag + index
         # 所在目录名, 通常是 genome_id)覆盖旧结果"的语义, 与 mmseqs_adapter
@@ -235,7 +244,14 @@ class DiamondAligner:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         os.makedirs(tmp_dir, exist_ok=True)
 
-        self._write_fasta(query, query_fasta)
+        if self_search and index_dir:
+            # query 与 index 是同一份序列集合: 直接复用 build_index 已写好的
+            # genes.fasta, 不再重新写一份内容完全相同的 query.fasta
+            # (2026-10-02, 方案3, 与用户确认)。
+            query_fasta = os.path.join(index_dir, "genes.fasta")
+        else:
+            query_fasta = os.path.join(tmp_dir, "query.fasta")
+            self._write_fasta(query, query_fasta)
 
         search_cmd = self._build_search_cmd(query_fasta, index, result_tsv)
         logger.debug("调用 diamond: %s", " ".join(search_cmd))

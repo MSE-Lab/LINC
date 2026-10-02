@@ -80,11 +80,15 @@ class MockAligner:
         return list(genes)
 
     def search(
-        self, query: Sequence[Gene], index: Any, tag: Optional[str] = None
+        self,
+        query: Sequence[Gene],
+        index: Any,
+        tag: Optional[str] = None,
+        self_search: bool = False,
     ) -> List[AlignmentResult]:
         """用 build_index 返回的基因列表作为 target, 对 query 做笛卡尔积比对。
 
-        tag 仅为满足 AlignerPort 接口签名而接受, Mock 实现不落盘任何中间
-        文件, 因此直接忽略(2026-10-02 与用户确认)。
+        tag/self_search 仅为满足 AlignerPort 接口签名而接受, Mock 实现不落盘
+        任何中间文件, 因此直接忽略(2026-10-02 与用户确认)。
         """
         return [self._lookup_or_compute(q, s) for q in query for s in index]
