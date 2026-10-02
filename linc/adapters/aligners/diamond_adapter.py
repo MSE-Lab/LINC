@@ -133,8 +133,8 @@ class DiamondAligner:
                 if query_id == subject_id:
                     # 过滤自身比对(全对全场景下 query/subject 来自同一份 fasta)。
                     continue
-                results.append(
-                    AlignmentResult(
+                try:
+                    result = AlignmentResult(
                         query_id=query_id,
                         subject_id=subject_id,
                         identity=float(pident) / 100.0,
@@ -144,7 +144,12 @@ class DiamondAligner:
                         bitscore=float(bits),
                         alignment_length=int(alnlen),
                     )
-                )
+                except ValueError:
+                    # 列数正确但某个字段非数值(如 diamond 输出 nan/inf),
+                    # 跳过该行而不中断整条流水线(2026-10-02 健壮性修复)。
+                    logger.warning("忽略含非数值字段的 diamond 输出行: %r", line)
+                    continue
+                results.append(result)
         # diamond 与 mmseqs 类似, 不保证跨进程/跨运行的输出行序一致, 而上层代码
         # 多处依赖"先遇到的hit"做平局判定(如 GlobalJoinStage 的 hit_by_cluster),
         # 此处按 (query_id, subject_id) 字典序排序, 消除这个非确定性来源。

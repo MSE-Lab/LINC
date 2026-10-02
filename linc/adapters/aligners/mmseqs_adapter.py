@@ -137,8 +137,8 @@ class MMseqsAligner:
                 if query_id == subject_id:
                     # 过滤自身比对(全对全场景下 query/subject 来自同一份 fasta)。
                     continue
-                results.append(
-                    AlignmentResult(
+                try:
+                    result = AlignmentResult(
                         query_id=query_id,
                         subject_id=subject_id,
                         identity=float(pident) / 100.0,
@@ -148,7 +148,12 @@ class MMseqsAligner:
                         bitscore=float(bits),
                         alignment_length=int(alnlen),
                     )
-                )
+                except ValueError:
+                    # 列数正确但某个字段非数值(如 mmseqs 输出 nan/inf),
+                    # 跳过该行而不中断整条流水线(2026-10-02 健壮性修复)。
+                    logger.warning("忽略含非数值字段的 mmseqs 输出行: %r", line)
+                    continue
+                results.append(result)
         # mmseqs 输出的行序不保证跨进程/跨运行一致(已通过最小复现实验验证:
         # 相同输入两次运行的结果集合完全一致, 但行序不同), 而上层代码多处
         # 依赖"先遇到的hit"做平局判定(如 GlobalJoinStage 的 hit_by_cluster)。

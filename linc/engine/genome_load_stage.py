@@ -62,8 +62,15 @@ def _parse_fasta(file_path: str) -> Iterator[Tuple[str, str]]:
 
     header 为 ">" 之后到行尾的原始文本(本阶段不保留，仅解析时使用);
     sequence 为去除换行/空白后拼接的序列字符串。
+
+    健壮性边界处理(2026-10-02, 与"不静默"原则保持一致):
+    - 若文件开头在第一个 ">" 之前出现非空序列行(无合法 header 归属),
+      记录 warning 后丢弃该片段, 不计入任何基因;
+    - 若某条记录的序列为空(如连续两个 ">" 行, header 之间无序列),
+      记录 warning 后跳过该记录, 不产出 length=0 的空序列。
     """
     header: str = ""
+    seen_header: bool = False
     seq_chunks: List[str] = []
     with open(file_path, "r", encoding="utf-8") as fh:
         for raw_line in fh:
@@ -71,14 +78,35 @@ def _parse_fasta(file_path: str) -> Iterator[Tuple[str, str]]:
             if not line:
                 continue
             if line.startswith(">"):
-                if header:
-                    yield header, "".join(seq_chunks)
+                if seen_header:
+                    sequence = "".join(seq_chunks)
+                    if sequence:
+                        yield header, sequence
+                    else:
+                        logger.warning(
+                            "FASTA 记录序列为空,已跳过: file_path=%s header=%r",
+                            file_path, header,
+                        )
                 header = line[1:].strip()
+                seen_header = True
                 seq_chunks = []
             else:
+                if not seen_header:
+                    logger.warning(
+                        "FASTA 文件在首个 '>' 之前出现序列行,已忽略: file_path=%s",
+                        file_path,
+                    )
+                    continue
                 seq_chunks.append(line)
-        if header:
-            yield header, "".join(seq_chunks)
+        if seen_header:
+            sequence = "".join(seq_chunks)
+            if sequence:
+                yield header, sequence
+            else:
+                logger.warning(
+                    "FASTA 记录序列为空,已跳过: file_path=%s header=%r",
+                    file_path, header,
+                )
 
 
 class GenomeLoadStage:

@@ -203,12 +203,14 @@ class GlobalRepresentativeLibrary:
     clusters: List[Cluster] = field(default_factory=list)
     gene_to_cluster: Dict[str, str] = field(default_factory=dict)  # 代表基因id -> cluster_id
     _genes_by_id: Dict[str, "Gene"] = field(default_factory=dict, repr=False)
+    # cluster_id -> Cluster 的索引, 与 self.clusters 保持同步(新增簇时一并写入),
+    # 使 get_cluster 从 O(n) 线性扫描降为 O(1) 字典查找(2026-10-02 修复低危1,
+    # global_join_stage._decide_and_apply 对每个命中都会调用一次 get_cluster,
+    # 大样本下原实现会退化为 O(命中数 × 簇数))。
+    _cluster_index: Dict[str, Cluster] = field(default_factory=dict, repr=False)
 
     def get_cluster(self, cluster_id: str) -> Optional[Cluster]:
-        for cluster in self.clusters:
-            if cluster.cluster_id == cluster_id:
-                return cluster
-        return None
+        return self._cluster_index.get(cluster_id)
 
     def representative_genes(self) -> List["Gene"]:
         """返回当前所有存活簇的代表基因列表(作为下一次 query 使用)。"""
@@ -235,6 +237,7 @@ class GlobalRepresentativeLibrary:
             member_ids={gene.gene_id},
         )
         self.clusters.append(cluster)
+        self._cluster_index[cluster_id] = cluster
         self.gene_to_cluster[gene.gene_id] = cluster_id
 
     def add_representative(self, cluster_id: str, gene: "Gene") -> None:
@@ -283,6 +286,7 @@ class GlobalRepresentativeLibrary:
             member_ids=member_ids,
         )
         self.clusters.append(merged)
+        self._cluster_index[merged_id] = merged
         return merged
 
     @property

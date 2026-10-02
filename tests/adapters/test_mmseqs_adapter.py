@@ -106,6 +106,25 @@ def test_malformed_output_line_is_skipped(monkeypatch, caplog):
     assert results == []
 
 
+def test_non_numeric_field_line_is_skipped_not_raised(monkeypatch):
+    # 列数正确但某字段是无法转为 float 的非数值字符串(如工具异常输出),
+    # 应跳过该行而不抛异常中断流水线。
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
+    tsv_lines = [
+        "g1|1\tg1|2\tN/A\t0.9\t0.95\t1e-30\t150.0\t90",
+        "g1|1\tg1|3\t85.5\t0.9\t0.95\t1e-30\t150.0\t90",
+    ]
+    monkeypatch.setattr(subprocess, "run", _fake_run_factory(tsv_lines))
+
+    aligner = MMseqsAligner()
+    results = aligner.align_all_vs_all(
+        [_gene("g1|1", 100), _gene("g1|2", 100), _gene("g1|3", 100)]
+    )
+
+    assert len(results) == 1
+    assert results[0].subject_id == "g1|3"
+
+
 def test_subprocess_failure_raises_runtime_error(monkeypatch):
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
 

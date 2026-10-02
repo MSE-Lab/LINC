@@ -162,3 +162,48 @@ def test_no_conflict_when_genome_ids_are_distinct(tmp_path):
     result = stage.run([str(foo_path), str(bar_path)])
 
     assert set(result.keys()) == {"foo", "bar"}
+
+
+def test_leading_sequence_before_first_header_is_ignored(tmp_path):
+    # 文件开头在第一个 ">" 之前出现的序列行应被忽略, 不计入任何基因,
+    # 也不应与后续正常记录的序列产生拼接(2026-10-02 健壮性修复)。
+    file_path = tmp_path / "leading.faa"
+    file_path.write_text("MKVLSTRAY\n>g1\nMKV\n", encoding="utf-8")
+
+    stage = GenomeLoadStage()
+    result = stage.run([str(file_path)])
+    genome = result["leading"]
+
+    assert genome.status == GenomeStatus.LOADED
+    assert len(genome.genes) == 1
+    assert genome.genes[0].sequence == "MKV"
+
+
+def test_consecutive_headers_produce_empty_record_is_skipped(tmp_path):
+    # 连续两个 ">" 行(header 之间无序列)会产生空序列记录, 应被跳过,
+    # 不生成 length=0 的 Gene, 也不打乱后续基因的 local_id 连续性。
+    file_path = tmp_path / "empty_record.faa"
+    file_path.write_text(">g1\n>g2\nMKV\n", encoding="utf-8")
+
+    stage = GenomeLoadStage()
+    result = stage.run([str(file_path)])
+    genome = result["empty_record"]
+
+    assert genome.status == GenomeStatus.LOADED
+    assert len(genome.genes) == 1
+    assert genome.genes[0].sequence == "MKV"
+    assert genome.genes[0].gene_id == "empty_record|1"
+
+
+def test_file_with_only_empty_records_marks_failed(tmp_path):
+    # 若文件里所有记录序列都为空(全部被跳过), 最终应没有任何基因,
+    # 与"空文件"一致地标记为 FAILED, 而不是产出 0 个 Gene 的 LOADED 状态。
+    file_path = tmp_path / "all_empty.faa"
+    file_path.write_text(">g1\n>g2\n", encoding="utf-8")
+
+    stage = GenomeLoadStage()
+    result = stage.run([str(file_path)])
+    genome = result["all_empty"]
+
+    assert genome.status == GenomeStatus.FAILED
+    assert genome.genes == []
