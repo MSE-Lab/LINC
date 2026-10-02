@@ -13,9 +13,14 @@
          已经算出的全对全比对结果(pairwise_hits), 不产生任何新比对。
        - full: 在 representative_member 基础上, 进一步补全簇内全部基因对
          (含成员-成员)关系; 同基因组内的成员-成员关系依然复用已有结果,
-         只有跨基因组的成员对才真正发起新比对(调用 AlignerPort.
-         align_query_vs_subject, 按"全局簇内涉及的基因组两两分组"批量调用,
-         不逐 pair 调用以避免子进程开销)。
+         只有跨基因组的成员对才真正发起新比对。性能方案(2026-10-02 与用户
+         确认, 修复"逐簇调用子进程"的性能问题): 不按"簇"循环调用比对,
+         而是先遍历全部活跃簇, 按"基因组对"聚合出需要查询的基因集合
+         (同一基因组对跨多个簇的 query 基因去重合并), 再对每个基因组对
+         只调用一次 AlignerPort.search(复用 IntraGenomeStage 已持久化的
+         genome_index 作为 target, 避免重新建库), 调用次数从
+         O(簇数×基因组对数) 降到 O(基因组对数); search 结果按"双方是否
+         属于同一个簇"过滤, 排除同一基因组对下属于不同簇的无关比对结果。
     3. 巨簇处理: 仅做信息提醒(超过 `mega_cluster_warning_threshold` 时记录
        warning), 不做自动降级或拆分 —— 与用户确认(2026-10-02): 任何跳过
        真实比对的"降级"或"拆分"都会让结果偏离"全对全比对"的最初设计目标,
@@ -85,7 +90,9 @@ class SSNBuilderStage:
         genes_by_id: Dict[str, Gene] = {
             gene.gene_id: gene for genome in genomes.values() for gene in genome.genes
         }
-        self._complete_cross_genome_member_edges(incremental_result, genes_by_id, edges)
+        self._complete_cross_genome_member_edges(
+            intra_results, incremental_result, genes_by_id, edges
+        )
 
         logger.info("SSNBuilderStage 完成(full模式): 共 %d 条边", len(edges))
         return CompleteSSN(edges=edges, edge_completion_mode=self._edge_completion_mode)
@@ -139,22 +146,37 @@ class SSNBuilderStage:
 
     def _complete_cross_genome_member_edges(
         self,
+        intra_results: Dict[str, GenomeIntraResult],
         incremental_result: IncrementalResult,
         genes_by_id: Dict[str, Gene],
         edges: Set[SSNEdge],
     ) -> None:
         """full 模式下真正需要新比对的部分: 同一个全局簇内, 来自不同基因组的
         成员之间从未被比对过(IntraGenomeStage 只做单基因组内全对全比对,
-        GlobalJoinStage 只比对代表), 按"全局簇内涉及的基因组两两分组"批量
-        调用 align_query_vs_subject, 避免逐 pair 调用子进程。
+        GlobalJoinStage 只比对代表)。
+
+        性能方案(2026-10-02 与用户确认, 修复"逐簇调用子进程"的性能问题):
+        不按"簇"循环发起比对调用(那样调用次数是 O(簇数×基因组对数), 簇数
+        一多开销会被迅速放大), 而是先遍历全部活跃簇, 按"基因组对"聚合出
+        需要查询的基因集合(同一基因组对跨多个簇的 query 基因去重合并),
+        再对每个基因组对只调用一次 `search`(复用 IntraGenomeStage 已持久化
+        的 `genome_index` 作为 target, 不重新建库), 调用次数降到
+        O(基因组对数), 与簇数无关; search 返回的结果可能包含"同一基因组对
+        下但分属不同簇"的无关基因对, 需按 `gene_id -> cluster_id` 映射过滤,
+        只保留双方属于同一个簇的结果。
         """
         global_lib = incremental_result.global_lib
+        gene_cluster_map: Dict[str, str] = {}
 
+        # 第一遍: 仅做簇内基因组分布统计(不涉及任何比对调用), 用于①巨簇
+        # warning 提醒 ②按基因组对聚合出去重后的 query 基因集合。
+        query_genes_by_genome_pair: Dict[tuple, Set[str]] = {}
         for cluster in global_lib.clusters:
             if not cluster.active:
                 continue
             members_by_genome: Dict[str, List[str]] = {}
             for gene_id in cluster.member_ids:
+                gene_cluster_map[gene_id] = cluster.cluster_id
                 gene = genes_by_id.get(gene_id)
                 if gene is None:
                     continue
@@ -179,15 +201,43 @@ class SSNBuilderStage:
 
             for i, genome_a in enumerate(genome_ids):
                 for genome_b in genome_ids[i + 1:]:
-                    query_genes = [genes_by_id[gid] for gid in members_by_genome[genome_a]]
-                    subject_genes = [genes_by_id[gid] for gid in members_by_genome[genome_b]]
-                    hits = self._aligner.align_query_vs_subject(query_genes, subject_genes)
-                    for hit in hits:
-                        edges.add(SSNEdge(
-                            source=hit.query_id, target=hit.subject_id,
-                            identity=hit.identity, coverage=hit.coverage,
-                            bitscore=hit.bitscore,
-                        ))
+                    pair_key = (genome_a, genome_b)
+                    query_genes_by_genome_pair.setdefault(pair_key, set()).update(
+                        members_by_genome[genome_a]
+                    )
+
+        logger.info(
+            "SSNBuilderStage(full模式): 需要新发起比对的基因组对数=%d(与簇数无关)",
+            len(query_genes_by_genome_pair),
+        )
+
+        # 第二遍: 每个基因组对只调用一次 search(复用已持久化的 genome_index),
+        # 不逐簇调用子进程。
+        for (genome_a, genome_b), query_gene_ids in query_genes_by_genome_pair.items():
+            query_genes = [genes_by_id[gid] for gid in sorted(query_gene_ids)]
+            intra_b = intra_results.get(genome_b)
+            index_b = intra_b.genome_index if intra_b is not None else None
+            if index_b is not None:
+                hits = self._aligner.search(query_genes, index_b)
+            else:
+                # 回退: 没有持久化索引可复用(如测试/某些 adapter 实现),
+                # 退化为一次性的便捷方法调用, 仍然按基因组对聚合, 不逐簇调用。
+                subject_genes = [
+                    gene for gid, gene in genes_by_id.items()
+                    if gene.genome_id == genome_b
+                ]
+                hits = self._aligner.align_query_vs_subject(query_genes, subject_genes)
+
+            for hit in hits:
+                # search 的 target 是整个基因组b的索引, 可能命中该基因组对下
+                # 分属不同簇的无关基因, 只保留双方属于同一个簇的结果。
+                if gene_cluster_map.get(hit.query_id) != gene_cluster_map.get(hit.subject_id):
+                    continue
+                edges.add(SSNEdge(
+                    source=hit.query_id, target=hit.subject_id,
+                    identity=hit.identity, coverage=hit.coverage,
+                    bitscore=hit.bitscore,
+                ))
 
     @staticmethod
     def _count_cross_genome_pairs(

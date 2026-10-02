@@ -239,6 +239,119 @@ def test_mega_cluster_warning_not_triggered_when_threshold_not_exceeded():
     assert not any("超过阈值" in r.getMessage() for r in records)
 
 
+def test_full_mode_uses_persisted_genome_index_not_align_query_vs_subject(monkeypatch):
+    """当 GenomeIntraResult.genome_index 可用时, full 模式应调用 `search`
+    (复用已持久化索引), 而不是重新建库的 `align_query_vs_subject`。
+    """
+    genomes, intra_results, incremental_result = _build_two_genome_fixture()
+    # 模拟 IntraGenomeStage 已经 build_index 并持久化了索引 handle。
+    intra_results["B"].genome_index = list(genomes["B"].genes)
+
+    aligner = MockAligner()
+    search_calls = {"n": 0}
+    align_calls = {"n": 0}
+    original_search = aligner.search
+    original_align = aligner.align_query_vs_subject
+
+    def _counting_search(query, index):
+        search_calls["n"] += 1
+        return original_search(query, index)
+
+    def _counting_align(query, subject):
+        align_calls["n"] += 1
+        return original_align(query, subject)
+
+    monkeypatch.setattr(aligner, "search", _counting_search)
+    monkeypatch.setattr(aligner, "align_query_vs_subject", _counting_align)
+
+    stage = SSNBuilderStage(aligner=aligner, edge_completion_mode="full")
+    result = stage.run(genomes, intra_results, incremental_result)
+
+    assert search_calls["n"] == 1
+    assert align_calls["n"] == 0
+    actual_pairs = {frozenset((e.source, e.target)) for e in result.edges}
+    assert frozenset(("A|2", "B|2")) in actual_pairs
+    assert frozenset(("A|3", "B|3")) in actual_pairs
+
+
+def test_full_mode_cross_genome_calls_independent_of_cluster_count(monkeypatch):
+    """多个全局簇共享同一对基因组时, 跨基因组比对调用次数应只取决于
+    "基因组对数量", 与簇数量无关(性能修复验证, 2026-10-02)。
+    """
+    a1, a2 = _gene("A|1", "A"), _gene("A|2", "A")
+    a3, a4 = _gene("A|3", "A"), _gene("A|4", "A")
+    b1, b2 = _gene("B|1", "B"), _gene("B|2", "B")
+    b3, b4 = _gene("B|3", "B"), _gene("B|4", "B")
+
+    genomes = {
+        "A": Genome(genome_id="A", file_path="a.faa", genes=[a1, a2, a3, a4]),
+        "B": Genome(genome_id="B", file_path="b.faa", genes=[b1, b2, b3, b4]),
+    }
+    intra_results = {
+        "A": GenomeIntraResult(
+            genome_id="A",
+            local_clusters=[
+                LocalCluster(cluster_id="A|cluster_0", member_ids={"A|1"},
+                              representative_ids=["A|1"], is_orphan=True),
+                LocalCluster(cluster_id="A|cluster_1", member_ids={"A|2"},
+                              representative_ids=["A|2"], is_orphan=True),
+                LocalCluster(cluster_id="A|cluster_2", member_ids={"A|3"},
+                              representative_ids=["A|3"], is_orphan=True),
+                LocalCluster(cluster_id="A|cluster_3", member_ids={"A|4"},
+                              representative_ids=["A|4"], is_orphan=True),
+            ],
+            local_representatives=["A|1", "A|2", "A|3", "A|4"],
+            n_genes=4, n_clusters=4, n_representatives=4,
+            pairwise_hits=[],
+        ),
+        "B": GenomeIntraResult(
+            genome_id="B",
+            local_clusters=[
+                LocalCluster(cluster_id="B|cluster_0", member_ids={"B|1"},
+                              representative_ids=["B|1"], is_orphan=True),
+                LocalCluster(cluster_id="B|cluster_1", member_ids={"B|2"},
+                              representative_ids=["B|2"], is_orphan=True),
+                LocalCluster(cluster_id="B|cluster_2", member_ids={"B|3"},
+                              representative_ids=["B|3"], is_orphan=True),
+                LocalCluster(cluster_id="B|cluster_3", member_ids={"B|4"},
+                              representative_ids=["B|4"], is_orphan=True),
+            ],
+            local_representatives=["B|1", "B|2", "B|3", "B|4"],
+            n_genes=4, n_clusters=4, n_representatives=4,
+            pairwise_hits=[],
+        ),
+    }
+    # 4个独立的全局簇, 每个簇都是 A/B 各一个成员(即都涉及同一对基因组 A,B)。
+    global_lib = GlobalRepresentativeLibrary(
+        clusters=[
+            GlobalCluster(cluster_id=f"global|cluster_{i}",
+                           representative_ids={f"A|{i + 1}", f"B|{i + 1}"},
+                           member_ids={f"A|{i + 1}", f"B|{i + 1}"}, active=True)
+            for i in range(4)
+        ]
+    )
+    incremental_result = IncrementalResult(global_lib=global_lib, ssn_edges=set())
+
+    aligner = MockAligner()
+    align_calls = {"n": 0}
+    original_align = aligner.align_query_vs_subject
+
+    def _counting_align(query, subject):
+        align_calls["n"] += 1
+        return original_align(query, subject)
+
+    monkeypatch.setattr(aligner, "align_query_vs_subject", _counting_align)
+
+    stage = SSNBuilderStage(aligner=aligner, edge_completion_mode="full")
+    result = stage.run(genomes, intra_results, incremental_result)
+
+    # 4个簇共享同一对基因组(A,B), 应只触发1次比对调用(而不是4次)。
+    assert align_calls["n"] == 1
+    actual_pairs = {frozenset((e.source, e.target)) for e in result.edges}
+    for i in range(4):
+        assert frozenset((f"A|{i + 1}", f"B|{i + 1}")) in actual_pairs
+
+
 def test_inactive_global_clusters_are_skipped():
     genomes, intra_results, incremental_result = _build_two_genome_fixture()
     incremental_result.global_lib.clusters[0].active = False
