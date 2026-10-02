@@ -188,3 +188,25 @@ def test_n_representatives_matches_sum_across_clusters():
         len(c.representative_ids) for c in result.local_clusters
     )
     assert result.n_representatives == len(result.local_representatives)
+
+
+def test_pairwise_hits_includes_all_non_self_comparisons_for_ssn_builder_reuse():
+    # pairwise_hits 应包含全部非自身比对结果(不论是否通过 cutoff 成簇),
+    # 供 SSNBuilderStage 补边阶段直接复用, 避免重复发起比对
+    # (2026-10-02 与用户确认)。
+    g1, g2, g3 = (_make_gene("g1", i) for i in range(1, 4))
+    aligner = MockAligner()
+    aligner.set_result(g1.gene_id, g2.gene_id, _result(g1, g2, 0.9))
+    # g1-g3 低于 cutoff_i, 不会成簇, 但仍应出现在 pairwise_hits 里
+    aligner.set_result(g1.gene_id, g3.gene_id, _result(g1, g3, 0.1))
+    aligner.set_result(g2.gene_id, g3.gene_id, _result(g2, g3, 0.1))
+    genome = Genome(genome_id="g1", file_path="g1.faa", genes=[g1, g2, g3])
+
+    result = _stage(aligner, cutoff_i=0.5).run(genome)
+
+    pairs = {frozenset((h.query_id, h.subject_id)) for h in result.pairwise_hits}
+    assert pairs == {
+        frozenset((g1.gene_id, g2.gene_id)),
+        frozenset((g1.gene_id, g3.gene_id)),
+        frozenset((g2.gene_id, g3.gene_id)),
+    }

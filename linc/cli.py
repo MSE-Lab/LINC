@@ -17,13 +17,15 @@ import json
 import logging
 import os
 import sys
+from typing import Optional
+
 import typer
 
 from .adapters.aligners.mock_adapter import MockAligner
 from .adapters.aligners.mmseqs_adapter import MMseqsAligner, MMseqsConfig
 from .adapters.aligners.diamond_adapter import DiamondAligner, DiamondConfig
 from .adapters.clustering.union_find_adapter import UnionFindClustering
-from .core.entities import VALID_COV_MODES, GenomeStatus
+from .core.entities import VALID_COV_MODES, VALID_EDGE_COMPLETION_MODES, GenomeStatus
 from .engine.genome_load_stage import (
     GenomeIdConflictError,
     GenomeLoadStage,
@@ -31,6 +33,7 @@ from .engine.genome_load_stage import (
 )
 from .engine.global_join_stage import GlobalJoinStage
 from .engine.intra_genome_stage import IntraGenomeStage
+from .engine.ssn_builder_stage import SSNBuilderStage
 
 app = typer.Typer(help="LINC: 增量基因组比较构建 SSN 并通过 MCL 细分蛋白质家族。")
 
@@ -100,6 +103,13 @@ def _build_join_summary(result) -> dict:
     }
 
 
+def _build_ssn_summary(complete_ssn) -> dict:
+    return {
+        "edge_completion_mode": complete_ssn.edge_completion_mode,
+        "n_edges": len(complete_ssn.edges),
+    }
+
+
 def _build_intra_summary(intra_results: dict) -> dict:
     total_genes = sum(r.n_genes for r in intra_results.values())
     total_representatives = sum(r.n_representatives for r in intra_results.values())
@@ -164,9 +174,23 @@ def run(
              "时结果在极少数边界情况下不保证严格可复现, 如需完全可复现结果请"
              "指定 --threads 1)。",
     ),
+    edge_completion_mode: str = typer.Option(
+        "representative_member", "--edge-completion-mode",
+        help="SSN 补边模式: none(不补边, 仅保留代表-代表边) | "
+             "representative_member(默认, 补代表-成员边, 复用已有比对结果,"
+             "零新增比对开销) | full(簇内全量补边, 同基因组内部分依旧免费复用,"
+             "仅跨基因组成员对会真正发起新比对, 大规模簇可能耗时较长)。",
+    ),
+    mega_cluster_warning_threshold: Optional[int] = typer.Option(
+        None, "--mega-cluster-warning-threshold",
+        help="仅 --edge-completion-mode full 生效: 当某个簇的跨基因组待比对"
+             "成员对数量超过该阈值时, 记录 warning 提醒(不会自动降级或拆分,"
+             "流程照常完整执行)。默认不设阈值, 不做任何提醒。",
+    ),
     verbose: bool = typer.Option(False, "--verbose", help="输出 DEBUG 级别日志。"),
 ) -> None:
-    """运行 LINC 流水线(当前阶段已接通 GenomeLoadStage + IntraGenomeStage + GlobalJoinStage)。"""
+    """运行 LINC 流水线(当前阶段已接通 GenomeLoadStage + IntraGenomeStage +
+    GlobalJoinStage + SSNBuilderStage)。"""
     _setup_logging(verbose)
 
     if not os.path.isdir(input_dir):
@@ -199,6 +223,19 @@ def run(
     if threads < 0:
         typer.secho(
             f"--threads 必须 >= 0, 当前为: {threads}",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+    if edge_completion_mode not in VALID_EDGE_COMPLETION_MODES:
+        typer.secho(
+            f"--edge-completion-mode 取值非法: {edge_completion_mode}"
+            f"(可选: {', '.join(VALID_EDGE_COMPLETION_MODES)})",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+    if mega_cluster_warning_threshold is not None and mega_cluster_warning_threshold < 1:
+        typer.secho(
+            f"--mega-cluster-warning-threshold 必须 >= 1, 当前为: {mega_cluster_warning_threshold}",
             fg=typer.colors.RED, err=True,
         )
         raise typer.Exit(code=1)
@@ -306,6 +343,25 @@ def run(
         f"{join_summary['n_ssn_edges']} 条 SSN 边"
     )
     typer.echo(f"摘要已写入: {join_summary_path}")
+
+    ssn_stage = SSNBuilderStage(
+        aligner=aligner,
+        edge_completion_mode=edge_completion_mode,
+        mega_cluster_warning_threshold=mega_cluster_warning_threshold,
+    )
+    logger.info("开始构建序列相似性网络(SSNBuilderStage), edge_completion_mode=%s", edge_completion_mode)
+    complete_ssn = ssn_stage.run(loaded_genomes, intra_results, join_result)
+
+    ssn_summary = _build_ssn_summary(complete_ssn)
+    ssn_summary_path = os.path.join(output_dir, "ssn_summary.json")
+    with open(ssn_summary_path, "w", encoding="utf-8") as fh:
+        json.dump(ssn_summary, fh, ensure_ascii=False, indent=2)
+
+    typer.echo(
+        f"SSN 构建完成(edge_completion_mode={edge_completion_mode}): "
+        f"共 {ssn_summary['n_edges']} 条边"
+    )
+    typer.echo(f"摘要已写入: {ssn_summary_path}")
 
 
 if __name__ == "__main__":

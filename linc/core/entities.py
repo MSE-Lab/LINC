@@ -120,30 +120,44 @@ class SSNEdge:
     """序列相似性网络(SSN)中的一条边。
 
     SSN 在生物学语义上是无向图(A-B 相似 = B-A 相似),且补边阶段需要按
-    "基因对"去重,而 identity/coverage 是可能因重新计算产生浮点误差的派生值,
-    不应参与相等性/哈希判断。因此本类关闭 dataclass 默认生成的 __eq__,
+    "基因对"去重,而 identity/coverage/bitscore 是可能因重新计算产生浮点误差的
+    派生值,不应参与相等性/哈希判断。因此本类关闭 dataclass 默认生成的 __eq__,
     改为自定义 __eq__/__hash__: 仅依据 frozenset({source, target}) 判定两条边
-    是否代表同一对基因,与字段顺序、identity/coverage 的具体数值无关。
+    是否代表同一对基因,与字段顺序、identity/coverage/bitscore 的具体数值无关。
     这样 SSNEdge 实例既可以安全地放入 set/用作 dict key(满足
     RepositoryPort.save_ssn_edges(edges: set) 的使用场景),又保留了
-    identity/coverage 可变、可原地更新的能力(未设为 frozen)。
+    identity/coverage/bitscore 可变、可原地更新的能力(未设为 frozen)。
+
+    权重采用"存储原始度量值 + 按需惰性计算"的设计(2026-10-02 与用户确认):
+    identity/coverage/bitscore 三个原始值随边一起存储,不固化成单一权重数字,
+    便于后续(如 MCL 细分阶段)按需切换权重公式而无需重新构建 SSN。
     """
 
     source: str
     target: str
     identity: float
     coverage: float
+    bitscore: float = 0.0
 
-    def weight(self, mode: str = "identity_x_coverage") -> float:
+    def weight(self, mode: str = "identity_x_coverage", alpha: float = 0.5) -> float:
         """根据指定模式计算边权重。
 
         Args:
-            mode: "identity_only" | "coverage_only" | "identity_x_coverage"(默认)。
+            mode: "identity"(含兼容别名 "identity_only") |
+                "coverage"(含兼容别名 "coverage_only") |
+                "identity_x_coverage"(默认, identity*coverage) |
+                "identity_coverage_weighted"(alpha*identity + (1-alpha)*coverage) |
+                "bitscore"(原始值, 不做归一化, 调用方需自行决定是否/如何归一化)。
+            alpha: 仅 mode="identity_coverage_weighted" 时生效, 默认 0.5。
         """
-        if mode == "identity_only":
+        if mode in ("identity", "identity_only"):
             return self.identity
-        if mode == "coverage_only":
+        if mode in ("coverage", "coverage_only"):
             return self.coverage
+        if mode == "identity_coverage_weighted":
+            return alpha * self.identity + (1 - alpha) * self.coverage
+        if mode == "bitscore":
+            return self.bitscore
         return self.identity * self.coverage
 
     def _pair_key(self) -> frozenset:
@@ -188,6 +202,10 @@ class GenomeIntraResult:
     n_representatives: int = 0
     genome_index: Any = None   # AlignerPort.build_index 返回的持久化索引 handle,
                                  # 供 GlobalJoinStage 复用, 避免重复建库(见 v2 设计文档 2.4节)
+    # 本基因组全对全比对的原始结果(不限于代表-成员, 也包括成员-成员),
+    # 供 SSNBuilderStage 补边时直接复用, 避免对同一基因组内已经比对过的基因对
+    # 重复发起比对(2026-10-02 与用户确认)。
+    pairwise_hits: List["AlignmentResult"] = field(default_factory=list)
 
 
 @dataclass
@@ -307,6 +325,35 @@ class IncrementalResult:
     processing_order: List[str] = field(default_factory=list)
     n_clusters_final: int = 0
     n_representatives_final: int = 0
+
+
+# 补边模式(Step4+5 合并, SSNBuilderStage, 与用户确认, 2026-10-02):
+# none = 不补边, 仅保留代表-代表边(稀疏SSN);
+# representative_member = 默认, 补"代表-成员"边, 复用 IntraGenomeStage 已有
+#   结果, 不产生任何新比对;
+# full = 在 representative_member 基础上, 补全簇内全部基因对(含成员-成员)
+#   关系, 同基因组内部分依旧复用已有结果, 仅跨基因组的成员对才真正发起新比对。
+EDGE_COMPLETION_NONE = "none"
+EDGE_COMPLETION_REPRESENTATIVE_MEMBER = "representative_member"
+EDGE_COMPLETION_FULL = "full"
+VALID_EDGE_COMPLETION_MODES = (
+    EDGE_COMPLETION_NONE,
+    EDGE_COMPLETION_REPRESENTATIVE_MEMBER,
+    EDGE_COMPLETION_FULL,
+)
+
+
+@dataclass
+class CompleteSSN:
+    """SSNBuilderStage(合并 Step4 稀疏SSN构建 + Step5 最终补边)的最终输出。
+
+    与用户确认(2026-10-02): 对于 full 模式下规模过大的簇("巨簇"), 本阶段仅
+    做信息提醒(日志 warning), 不做自动降级或拆分 —— 避免悄悄产出有损/近似的
+    SSN, 把"是否要为此付出更长运行时间"的决定权交还给用户。
+    """
+
+    edges: Set["SSNEdge"] = field(default_factory=set)
+    edge_completion_mode: str = EDGE_COMPLETION_REPRESENTATIVE_MEMBER
 
 
 @dataclass

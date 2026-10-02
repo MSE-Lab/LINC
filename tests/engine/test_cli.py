@@ -208,3 +208,91 @@ def test_run_join_summary_empty_when_no_genomes_loaded(tmp_path):
     assert join_summary["processing_order"] == []
     assert join_summary["n_clusters_final"] == 0
     assert join_summary["n_representatives_final"] == 0
+
+
+def test_run_writes_ssn_summary_with_default_mode(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV"), ("g2", "MKL")])
+    _write_fasta(str(input_dir / "genome02.faa"), [("g3", "MKV")])
+
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(
+        app, ["run", "-i", str(input_dir), "-o", str(output_dir)]
+    )
+
+    assert result.exit_code == 0
+    assert "SSN 构建完成" in result.stdout
+
+    ssn_summary_path = output_dir / "ssn_summary.json"
+    assert ssn_summary_path.exists()
+    ssn_summary = json.loads(ssn_summary_path.read_text(encoding="utf-8"))
+    assert ssn_summary["edge_completion_mode"] == "representative_member"
+    assert isinstance(ssn_summary["n_edges"], int)
+
+
+def test_run_edge_completion_mode_none_is_accepted(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(
+        app,
+        ["run", "-i", str(input_dir), "-o", str(output_dir), "--edge-completion-mode", "none"],
+    )
+
+    assert result.exit_code == 0
+    ssn_summary = json.loads((output_dir / "ssn_summary.json").read_text(encoding="utf-8"))
+    assert ssn_summary["edge_completion_mode"] == "none"
+
+
+def test_run_invalid_edge_completion_mode_exits_with_error(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(
+        app,
+        ["run", "-i", str(input_dir), "-o", str(output_dir), "--edge-completion-mode", "bogus"],
+    )
+
+    assert result.exit_code != 0
+    assert not output_dir.exists()
+
+
+def test_run_invalid_mega_cluster_warning_threshold_exits_with_error(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(
+        app,
+        [
+            "run", "-i", str(input_dir), "-o", str(output_dir),
+            "--mega-cluster-warning-threshold", "0",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert not output_dir.exists()
+
+
+def test_run_full_edge_completion_mode_end_to_end(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV"), ("g2", "MKL")])
+    _write_fasta(str(input_dir / "genome02.faa"), [("g3", "MKV")])
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(
+        app,
+        ["run", "-i", str(input_dir), "-o", str(output_dir), "--edge-completion-mode", "full"],
+    )
+
+    assert result.exit_code == 0
+    ssn_summary = json.loads((output_dir / "ssn_summary.json").read_text(encoding="utf-8"))
+    assert ssn_summary["edge_completion_mode"] == "full"

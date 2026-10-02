@@ -2,6 +2,7 @@
 from linc.core.entities import (
     AlignmentResult,
     Cluster,
+    CompleteSSN,
     Gene,
     Genome,
     GenomeIntraResult,
@@ -56,11 +57,34 @@ def test_cluster_default_sets_are_independent_and_active_by_default():
 
 
 def test_ssn_edge_weight_modes():
-    edge = SSNEdge(source="g1|1", target="g2|1", identity=0.8, coverage=0.5)
+    edge = SSNEdge(source="g1|1", target="g2|1", identity=0.8, coverage=0.5, bitscore=200.0)
+    # 旧别名(向后兼容)
     assert edge.weight("identity_only") == 0.8
     assert edge.weight("coverage_only") == 0.5
+    # 新命名
+    assert edge.weight("identity") == 0.8
+    assert edge.weight("coverage") == 0.5
     assert edge.weight("identity_x_coverage") == 0.4
     assert edge.weight() == 0.4  # 默认模式与显式指定一致
+    # 新增: identity/coverage 加权平均
+    assert edge.weight("identity_coverage_weighted") == 0.65  # 0.5*0.8+0.5*0.5
+    assert edge.weight("identity_coverage_weighted", alpha=0.0) == 0.5
+    assert edge.weight("identity_coverage_weighted", alpha=1.0) == 0.8
+    # 新增: bitscore 原始值, 不归一化
+    assert edge.weight("bitscore") == 200.0
+
+
+def test_ssn_edge_bitscore_defaults_to_zero_for_backward_compat():
+    edge = SSNEdge(source="g1|1", target="g2|1", identity=0.8, coverage=0.5)
+    assert edge.bitscore == 0.0
+
+
+def test_complete_ssn_defaults_are_independent():
+    ssn1 = CompleteSSN()
+    ssn2 = CompleteSSN()
+    ssn1.edges.add(SSNEdge(source="g1|1", target="g2|1", identity=0.8, coverage=0.5))
+    assert ssn1.edges != ssn2.edges
+    assert ssn1.edge_completion_mode == "representative_member"
 
 
 def test_ssn_edge_is_hashable_and_usable_in_set():
@@ -118,3 +142,15 @@ def test_genome_intra_result_defaults_are_independent():
     assert r1.local_clusters != r2.local_clusters
     assert r1.n_genes == 0
     assert r1.n_clusters == 0
+    assert r1.pairwise_hits == []
+
+
+def test_genome_intra_result_pairwise_hits_defaults_are_independent():
+    r1 = GenomeIntraResult(genome_id="g1")
+    r2 = GenomeIntraResult(genome_id="g2")
+    r1.pairwise_hits.append(AlignmentResult(
+        query_id="g1|1", subject_id="g1|2", identity=0.9,
+        query_cover=0.9, subject_cover=0.9, evalue=1e-30,
+        bitscore=150.0, alignment_length=100,
+    ))
+    assert r1.pairwise_hits != r2.pairwise_hits

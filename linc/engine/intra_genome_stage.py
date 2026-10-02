@@ -33,6 +33,7 @@ import networkx as nx
 
 from ..core.entities import (
     COV_MODE_BIDIRECTIONAL,
+    AlignmentResult,
     Genome,
     GenomeIntraResult,
     LocalCluster,
@@ -84,6 +85,7 @@ class IntraGenomeStage:
         hits = self._aligner.search(genes, genome_index)
 
         identity_map: _IdentityMap = {}
+        pairwise_hits: List[AlignmentResult] = []
         graph = nx.Graph()
         graph.add_nodes_from(gene.gene_id for gene in genes)
         for hit in hits:
@@ -91,6 +93,7 @@ class IntraGenomeStage:
                 continue   # 自身比对(all-vs-all 场景下 query/target 来自同一份序列集合)
             identity_map[(hit.query_id, hit.subject_id)] = hit.identity
             identity_map[(hit.subject_id, hit.query_id)] = hit.identity
+            pairwise_hits.append(hit)
             if passes_inclusion_cutoff(hit, self._cutoff_i, self._cutoff_c, self._cov_mode):
                 graph.add_edge(hit.query_id, hit.subject_id)
 
@@ -144,6 +147,7 @@ class IntraGenomeStage:
             n_clusters=len(local_clusters),
             n_representatives=len(local_representatives),
             genome_index=genome_index,
+            pairwise_hits=pairwise_hits,
         )
         logger.info(
             "IntraGenomeStage 完成: genome_id=%s n_genes=%d n_clusters=%d "
