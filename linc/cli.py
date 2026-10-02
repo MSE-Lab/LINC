@@ -24,7 +24,11 @@ from .adapters.aligners.mmseqs_adapter import MMseqsAligner, MMseqsConfig
 from .adapters.aligners.diamond_adapter import DiamondAligner, DiamondConfig
 from .adapters.clustering.union_find_adapter import UnionFindClustering
 from .core.entities import VALID_COV_MODES, GenomeStatus
-from .engine.genome_load_stage import GenomeLoadStage, discover_fasta_files
+from .engine.genome_load_stage import (
+    GenomeIdConflictError,
+    GenomeLoadStage,
+    discover_fasta_files,
+)
 from .engine.global_join_stage import GlobalJoinStage
 from .engine.intra_genome_stage import IntraGenomeStage
 
@@ -200,7 +204,11 @@ def run(
         )
 
     logger.info("开始加载基因组, 共发现 %d 个候选文件", len(genome_files))
-    genomes = GenomeLoadStage().run(genome_files)
+    try:
+        genomes = GenomeLoadStage().run(genome_files)
+    except GenomeIdConflictError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
 
     summary = _build_load_summary(genomes)
 

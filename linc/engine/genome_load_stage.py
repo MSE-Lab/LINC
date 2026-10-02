@@ -9,12 +9,16 @@
     2. 单个文件解析失败(不存在/为空/格式异常)不中断整体流程,
        该基因组标记为 GenomeStatus.FAILED 并记录明确的日志提示,
        继续处理其余文件(增量场景下一个文件坏了不该拖垮全局)。
+    3. 若多个文件解析出相同的 genome_id(文件名 stem 相同, 如 foo.fa 与
+       foo.faa), 则视为无法自行消歧的歧义, 直接抛出 GenomeIdConflictError
+       中断整个流程, 要求用户手动解决目录中的文件冲突后重新运行。
 
 不引入 biopython 等第三方依赖,使用标准库手写一个极简 FASTA 解析器。
 """
 import glob
 import logging
 import os
+from collections import defaultdict
 from typing import Dict, Iterator, List, Tuple
 
 from ..core.entities import Gene, Genome, GenomeStatus
@@ -22,6 +26,23 @@ from ..core.entities import Gene, Genome, GenomeStatus
 logger = logging.getLogger(__name__)
 
 _FASTA_EXTENSIONS = ("*.fasta", "*.fa", "*.faa")
+
+
+class GenomeIdConflictError(ValueError):
+    """多个 FASTA 文件解析出相同的 genome_id(文件名 stem 相同)。
+
+    例如同目录下存在 foo.fa 与 foo.faa: 二者会被视为"同一个基因组",
+    这通常意味着目录里混入了不该共存的文件(同一基因组的不同格式拷贝、
+    新旧版本等),程序无法自行判断该保留哪一个,因此直接中断整个流程,
+    要求用户先手动解决目录中的文件冲突后再重新运行(2026-10-02 与用户确认)。
+    """
+
+    def __init__(self, conflicts: Dict[str, List[str]]) -> None:
+        self.conflicts = conflicts
+        detail = "; ".join(
+            f"{genome_id} -> {paths}" for genome_id, paths in conflicts.items()
+        )
+        super().__init__(f"检测到重名的 genome_id, 已中断加载: {detail}")
 
 
 def discover_fasta_files(directory: str) -> List[str]:
@@ -70,6 +91,7 @@ class GenomeLoadStage:
         gene_id 格式为 "{genome_id}|{local_id}",local_id 为基因在文件中的
         序号(从 1 开始),不使用 FASTA header 原文本作为 ID。
         """
+        self._check_genome_id_conflicts(genome_files)
         result: Dict[str, Genome] = {}
         for file_path in genome_files:
             genome_id = self._extract_genome_id(file_path)
@@ -77,6 +99,26 @@ class GenomeLoadStage:
             result[genome_id] = genome
         self._log_summary(result)
         return result
+
+    def _check_genome_id_conflicts(self, genome_files: List[str]) -> None:
+        """检测 genome_id(文件名 stem)重名, 一旦发现立即中断整个流程。
+
+        与单文件解析失败(不存在/为空/格式异常)不同, genome_id 冲突不是
+        单个文件自身的问题, 而是程序无法自行消歧的歧义, 因此不适用
+        "单文件失败不中断"的既有策略, 必须直接报错停止。
+        """
+        files_by_genome_id: Dict[str, List[str]] = defaultdict(list)
+        for file_path in genome_files:
+            genome_id = self._extract_genome_id(file_path)
+            files_by_genome_id[genome_id].append(file_path)
+        conflicts = {
+            genome_id: paths
+            for genome_id, paths in files_by_genome_id.items()
+            if len(paths) > 1
+        }
+        if conflicts:
+            logger.error("检测到重名的 genome_id, 中断加载: %s", conflicts)
+            raise GenomeIdConflictError(conflicts)
 
     @staticmethod
     def _extract_genome_id(file_path: str) -> str:

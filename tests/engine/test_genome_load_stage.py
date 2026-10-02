@@ -1,8 +1,14 @@
 """GenomeLoadStage 单元测试。"""
 import os
 
+import pytest
+
 from linc.core.entities import GenomeStatus
-from linc.engine.genome_load_stage import GenomeLoadStage, discover_fasta_files
+from linc.engine.genome_load_stage import (
+    GenomeIdConflictError,
+    GenomeLoadStage,
+    discover_fasta_files,
+)
 
 
 def _write_fasta(path: str, records: list) -> None:
@@ -127,3 +133,32 @@ def test_discover_fasta_files_returns_sorted_list(tmp_path):
 def test_discover_fasta_files_empty_directory_returns_empty_list(tmp_path):
     found = discover_fasta_files(str(tmp_path))
     assert found == []
+
+
+def test_duplicate_genome_id_raises_and_aborts(tmp_path):
+    # foo.fa 与 foo.faa 的文件名 stem 相同, 均解析为 genome_id="foo",
+    # 应检测到冲突并直接中断整个 run(), 而不是静默覆盖或只保留其中一个。
+    fa_path = tmp_path / "foo.fa"
+    faa_path = tmp_path / "foo.faa"
+    _write_fasta(str(fa_path), [("g1", "MK")])
+    _write_fasta(str(faa_path), [("g1", "MK")])
+
+    stage = GenomeLoadStage()
+    with pytest.raises(GenomeIdConflictError) as exc_info:
+        stage.run([str(fa_path), str(faa_path)])
+
+    assert "foo" in exc_info.value.conflicts
+    assert set(exc_info.value.conflicts["foo"]) == {str(fa_path), str(faa_path)}
+
+
+def test_no_conflict_when_genome_ids_are_distinct(tmp_path):
+    # 对照: 文件名 stem 不同时不应触发冲突检测, run() 正常返回。
+    foo_path = tmp_path / "foo.faa"
+    bar_path = tmp_path / "bar.faa"
+    _write_fasta(str(foo_path), [("g1", "MK")])
+    _write_fasta(str(bar_path), [("g1", "MK")])
+
+    stage = GenomeLoadStage()
+    result = stage.run([str(foo_path), str(bar_path)])
+
+    assert set(result.keys()) == {"foo", "bar"}
