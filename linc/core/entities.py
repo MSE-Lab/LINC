@@ -42,7 +42,15 @@ class Genome:
 
 @dataclass
 class AlignmentResult:
-    """一次两两比对的结果记录(来自 MMseqs2/DIAMOND 等比对引擎)。"""
+    """一次两两比对的结果记录(来自 MMseqs2/DIAMOND 等比对引擎)。
+
+    接口契约(各 AlignerPort 实现必须遵守): identity/query_cover/subject_cover
+    统一为 [0, 1] 范围的小数, 而非百分数(0-100)。比对工具原始输出若为百分数
+    (如 diamond 的 pident/qcovhsp/scovhsp),adapter 必须在解析阶段自行 ÷100
+    换算后再构造本类实例,不允许把百分数原样传出,以保证不同后端(mmseqs/
+    diamond/mock/未来的 blastp 等)之间的数值可比、且与 cutoff_i/cutoff_ii
+    等按 [0, 1] 定义的阈值语义一致。
+    """
 
     query_id: str
     subject_id: str

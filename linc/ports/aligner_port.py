@@ -13,6 +13,12 @@ from ..core.entities import AlignmentResult, Gene
 class AlignerPort(Protocol):
     """序列比对引擎抽象接口。
 
+    数值口径契约: 所有方法返回的 AlignmentResult.identity/query_cover/
+    subject_cover 必须统一为 [0, 1] 范围的小数(详见 core.entities.
+    AlignmentResult 的说明)。接入新的比对工具(如 blastp)时,若该工具原始
+    输出是百分数(0-100),必须在对应 adapter 内部换算后再返回,不得依赖
+    上层代码再次转换。
+
     build_index/search 是统一的"建库-查询"两步原语(2026-10-01 新增,
     详见 docs/LINC_技术框架设计_v2.md 第2.4节"GlobalJoinStage 性能方案"):
     - build_index: 为给定序列集合建立一个可复用的索引(builder 持久化到工作目录,
