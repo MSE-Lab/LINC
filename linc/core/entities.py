@@ -60,6 +60,12 @@ class AlignmentResult:
     evalue: float
     bitscore: float
     alignment_length: int
+    # query/subject 序列全长(氨基酸数), 直接取自比对工具输出(mmseqs qlen/tlen,
+    # diamond qlen/slen), 而非重新查 Gene.length, 保证与该次比对实际使用的
+    # 序列长度口径一致。默认 0 表示未知(如历史数据/未升级的测试构造),
+    # 为未来 MCL 权重归一化(如 OrthoFinder 式长度校正)预留(2026-10-02 与用户确认)。
+    query_length: int = 0
+    subject_length: int = 0
 
     @property
     def coverage(self) -> float:
@@ -138,6 +144,12 @@ class SSNEdge:
     identity: float
     coverage: float
     bitscore: float = 0.0
+    # 与 AlignmentResult.query_length/subject_length 对应, 从产生该边的比对结果
+    # 转存而来, 为未来 MCL 权重归一化(如 OrthoFinder 式长度校正)预留,
+    # 默认 0 表示未知(2026-10-02 与用户确认)。source/target 对应 query/subject
+    # 的先后关系由构造方保证一致, 不在本类内部做强制校验。
+    source_length: int = 0
+    target_length: int = 0
 
     def weight(self, mode: str = "identity_x_coverage", alpha: float = 0.5) -> float:
         """根据指定模式计算边权重。

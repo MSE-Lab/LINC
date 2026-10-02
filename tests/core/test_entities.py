@@ -79,6 +79,30 @@ def test_ssn_edge_bitscore_defaults_to_zero_for_backward_compat():
     assert edge.bitscore == 0.0
 
 
+def test_alignment_result_length_fields_default_to_zero_for_backward_compat():
+    hit = AlignmentResult(
+        query_id="g1|1", subject_id="g2|1", identity=0.8,
+        query_cover=0.9, subject_cover=0.9, evalue=1e-30,
+        bitscore=150.0, alignment_length=100,
+    )
+    assert hit.query_length == 0
+    assert hit.subject_length == 0
+
+
+def test_ssn_edge_length_fields_default_to_zero_and_can_be_set():
+    # 默认 0(向后兼容既有构造调用)
+    edge_default = SSNEdge(source="g1|1", target="g2|1", identity=0.8, coverage=0.5)
+    assert edge_default.source_length == 0
+    assert edge_default.target_length == 0
+    # 显式设置, 为未来 MCL 权重归一化预留(2026-10-02 与用户确认)
+    edge = SSNEdge(
+        source="g1|1", target="g2|1", identity=0.8, coverage=0.5,
+        source_length=120, target_length=150,
+    )
+    assert edge.source_length == 120
+    assert edge.target_length == 150
+
+
 def test_complete_ssn_defaults_are_independent():
     ssn1 = CompleteSSN()
     ssn2 = CompleteSSN()

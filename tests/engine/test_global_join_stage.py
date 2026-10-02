@@ -93,6 +93,11 @@ def test_second_genome_cutoff_ii_hit_reuses_existing_representative():
     assert result.n_representatives_final == 1   # g2 的代表未新增, 沿用 g1 的代表
     # SSN 边应记录这次高置信命中
     assert len(result.ssn_edges) == 1
+    # 边应携带 source_length/target_length(为未来 MCL 权重归一化预留,
+    # 2026-10-02 与用户确认), MockAligner 按 Gene.length 填充, 两基因长度均为100。
+    [edge] = result.ssn_edges
+    assert edge.source_length == 100
+    assert edge.target_length == 100
 
 
 def test_second_genome_cutoff_i_only_hit_adds_new_representative():

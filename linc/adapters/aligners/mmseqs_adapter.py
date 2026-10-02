@@ -27,7 +27,9 @@ from ...core.entities import AlignmentResult, Gene
 logger = logging.getLogger(__name__)
 
 # easy-search 输出列的顺序, 与 AlignmentResult 字段逐一对应(pident 为百分数, 需转为 0-1)。
-_FORMAT_OUTPUT = "query,target,pident,qcov,tcov,evalue,bits,alnlen"
+# qlen/tlen(query/target 全长)取自 mmseqs 自身输出, 为未来 MCL 权重归一化
+# (如 OrthoFinder 式长度校正)预留, 而非回查 Gene.length(2026-10-02 与用户确认)。
+_FORMAT_OUTPUT = "query,target,pident,qcov,tcov,evalue,bits,alnlen,qlen,tlen"
 
 # 持久化索引(build_index/search 原语)的默认工作目录,运行期间不自动清理,
 # 贴合 LINC 断点续跑/增量添加数据的定位(与用户确认,2026-10-01)。
@@ -130,10 +132,10 @@ class MMseqsAligner:
                 if not line:
                     continue
                 parts = line.split("\t")
-                if len(parts) != 8:
+                if len(parts) != 10:
                     logger.warning("忽略格式异常的 mmseqs 输出行: %r", line)
                     continue
-                query_id, subject_id, pident, qcov, tcov, evalue, bits, alnlen = parts
+                query_id, subject_id, pident, qcov, tcov, evalue, bits, alnlen, qlen, tlen = parts
                 if query_id == subject_id:
                     # 过滤自身比对(全对全场景下 query/subject 来自同一份 fasta)。
                     continue
@@ -147,6 +149,8 @@ class MMseqsAligner:
                         evalue=float(evalue),
                         bitscore=float(bits),
                         alignment_length=int(alnlen),
+                        query_length=int(qlen),
+                        subject_length=int(tlen),
                     )
                 except ValueError:
                     # 列数正确但某个字段非数值(如 mmseqs 输出 nan/inf),

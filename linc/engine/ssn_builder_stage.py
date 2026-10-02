@@ -129,10 +129,14 @@ class SSNBuilderStage:
                     for member_id in plain_members:
                         hit = pair_lookup.get(frozenset((rep_id, member_id)))
                         if hit is not None:
+                            source_length, target_length = SSNBuilderStage._lengths_for(
+                                hit, rep_id
+                            )
                             edges.add(SSNEdge(
                                 source=rep_id, target=member_id,
                                 identity=hit.identity, coverage=hit.coverage,
                                 bitscore=hit.bitscore,
+                                source_length=source_length, target_length=target_length,
                             ))
 
                 if include_member_member:
@@ -141,10 +145,14 @@ class SSNBuilderStage:
                         for gene_b in members[i + 1:]:
                             hit = pair_lookup.get(frozenset((gene_a, gene_b)))
                             if hit is not None:
+                                source_length, target_length = SSNBuilderStage._lengths_for(
+                                    hit, gene_a
+                                )
                                 edges.add(SSNEdge(
                                     source=gene_a, target=gene_b,
                                     identity=hit.identity, coverage=hit.coverage,
                                     bitscore=hit.bitscore,
+                                    source_length=source_length, target_length=target_length,
                                 ))
 
     def _complete_cross_genome_member_edges(
@@ -242,7 +250,18 @@ class SSNBuilderStage:
                     source=hit.query_id, target=hit.subject_id,
                     identity=hit.identity, coverage=hit.coverage,
                     bitscore=hit.bitscore,
+                    source_length=hit.query_length, target_length=hit.subject_length,
                 ))
+
+    @staticmethod
+    def _lengths_for(hit: AlignmentResult, source_id: str) -> tuple:
+        """把 AlignmentResult 的 query_length/subject_length 按 source/target
+        的实际方向对齐返回(SSNEdge 的 source 不一定等于 hit.query_id,
+        因为 pair_lookup 按 frozenset 去重, 可能存的是反向记录)。
+        """
+        if hit.query_id == source_id:
+            return hit.query_length, hit.subject_length
+        return hit.subject_length, hit.query_length
 
     @staticmethod
     def _count_cross_genome_pairs(

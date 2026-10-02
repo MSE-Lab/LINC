@@ -26,7 +26,9 @@ logger = logging.getLogger(__name__)
 
 # diamond --outfmt 6 自定义列顺序, 与 AlignmentResult 字段逐一对应
 # (pident 为百分数, qcovhsp/scovhsp 为百分数, 需与 mmseqs 侧保持同口径)。
-_OUTFMT_COLUMNS = "qseqid sseqid pident qcovhsp scovhsp evalue bitscore length"
+# qlen/slen(query/subject 全长)取自 diamond 自身输出, 为未来 MCL 权重归一化
+# (如 OrthoFinder 式长度校正)预留, 而非回查 Gene.length(2026-10-02 与用户确认)。
+_OUTFMT_COLUMNS = "qseqid sseqid pident qcovhsp scovhsp evalue bitscore length qlen slen"
 
 # 持久化索引(build_index/search 原语)的默认工作目录,运行期间不自动清理,
 # 贴合 LINC 断点续跑/增量添加数据的定位(与 mmseqs_adapter 保持一致)。
@@ -126,10 +128,10 @@ class DiamondAligner:
                 if not line:
                     continue
                 parts = line.split("\t")
-                if len(parts) != 8:
+                if len(parts) != 10:
                     logger.warning("忽略格式异常的 diamond 输出行: %r", line)
                     continue
-                query_id, subject_id, pident, qcov, tcov, evalue, bits, alnlen = parts
+                query_id, subject_id, pident, qcov, tcov, evalue, bits, alnlen, qlen, slen = parts
                 if query_id == subject_id:
                     # 过滤自身比对(全对全场景下 query/subject 来自同一份 fasta)。
                     continue
@@ -143,6 +145,8 @@ class DiamondAligner:
                         evalue=float(evalue),
                         bitscore=float(bits),
                         alignment_length=int(alnlen),
+                        query_length=int(qlen),
+                        subject_length=int(slen),
                     )
                 except ValueError:
                     # 列数正确但某个字段非数值(如 diamond 输出 nan/inf),

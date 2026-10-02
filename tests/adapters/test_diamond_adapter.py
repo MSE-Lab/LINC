@@ -49,8 +49,8 @@ def _fake_run_factory(tsv_lines):
 def test_align_all_vs_all_parses_result_and_filters_self_hit(monkeypatch):
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/diamond")
     tsv_lines = [
-        "g1|1\tg1|1\t100.0\t100.0\t100.0\t0.0\t200.0\t100",  # 自身比对, 应被过滤
-        "g1|1\tg1|2\t85.5\t90.0\t95.0\t1e-30\t150.0\t90",
+        "g1|1\tg1|1\t100.0\t100.0\t100.0\t0.0\t200.0\t100\t100\t100",  # 自身比对, 应被过滤
+        "g1|1\tg1|2\t85.5\t90.0\t95.0\t1e-30\t150.0\t90\t100\t100",
     ]
     monkeypatch.setattr(subprocess, "run", _fake_run_factory(tsv_lines))
 
@@ -73,7 +73,7 @@ def test_align_all_vs_all_parses_result_and_filters_self_hit(monkeypatch):
 
 def test_align_query_vs_subject_uses_separate_fasta(monkeypatch):
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/diamond")
-    tsv_lines = ["q1\ts1\t50.0\t50.0\t50.0\t1e-5\t20.0\t10"]
+    tsv_lines = ["q1\ts1\t50.0\t50.0\t50.0\t1e-5\t20.0\t10\t10\t20"]
     monkeypatch.setattr(subprocess, "run", _fake_run_factory(tsv_lines))
 
     aligner = DiamondAligner()
@@ -83,6 +83,22 @@ def test_align_query_vs_subject_uses_separate_fasta(monkeypatch):
 
     assert len(results) == 1
     assert results[0].identity == pytest.approx(0.5)
+
+
+def test_align_all_vs_all_parses_query_subject_length(monkeypatch):
+    """qlen/slen 列应解析为 query_length/subject_length, 为未来 MCL 权重
+    归一化(如 OrthoFinder 式长度校正)预留(2026-10-02 与用户确认)。
+    """
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/diamond")
+    tsv_lines = ["g1|1\tg1|2\t85.5\t90.0\t95.0\t1e-30\t150.0\t90\t120\t130"]
+    monkeypatch.setattr(subprocess, "run", _fake_run_factory(tsv_lines))
+
+    aligner = DiamondAligner()
+    results = aligner.align_all_vs_all([_gene("g1|1", 120), _gene("g1|2", 130)])
+
+    assert len(results) == 1
+    assert results[0].query_length == 120
+    assert results[0].subject_length == 130
 
 
 def test_empty_query_or_subject_returns_empty_without_calling_subprocess(monkeypatch):
@@ -114,8 +130,8 @@ def test_non_numeric_field_line_is_skipped_not_raised(monkeypatch):
     # 合法解析, 这里用一个真正非数值的字符串 "N/A" 来触发 ValueError)。
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/diamond")
     tsv_lines = [
-        "g1|1\tg1|2\tN/A\t90.0\t95.0\t1e-30\t150.0\t90",
-        "g1|1\tg1|3\t85.5\t90.0\t95.0\t1e-30\t150.0\t90",
+        "g1|1\tg1|2\tN/A\t90.0\t95.0\t1e-30\t150.0\t90\t100\t100",
+        "g1|1\tg1|3\t85.5\t90.0\t95.0\t1e-30\t150.0\t90\t100\t100",
     ]
     monkeypatch.setattr(subprocess, "run", _fake_run_factory(tsv_lines))
 
@@ -230,7 +246,7 @@ def test_search_runs_blastp_against_persisted_index_without_query_makedb(monkeyp
         calls.append(cmd)
         result_tsv = cmd[cmd.index("-o") + 1]
         with open(result_tsv, "w", encoding="utf-8") as fh:
-            fh.write("q1\ts1\t80.0\t0.8\t0.8\t1e-10\t100.0\t50")
+            fh.write("q1\ts1\t80.0\t0.8\t0.8\t1e-10\t100.0\t50\t10\t10")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", _fake_run)
@@ -258,7 +274,7 @@ def test_search_overwrites_previous_results_for_same_index_dir(monkeypatch, tmp_
     def _fake_run(cmd, check, capture_output, text):
         result_tsv = cmd[cmd.index("-o") + 1]
         with open(result_tsv, "w", encoding="utf-8") as fh:
-            fh.write("q1\ts1\t80.0\t0.8\t0.8\t1e-10\t100.0\t50")
+            fh.write("q1\ts1\t80.0\t0.8\t0.8\t1e-10\t100.0\t50\t10\t10")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", _fake_run)
@@ -288,7 +304,7 @@ def test_search_tag_uses_separate_subdir_and_does_not_overwrite_other_tags(monke
     def _fake_run(cmd, check, capture_output, text):
         result_tsv = cmd[cmd.index("-o") + 1]
         with open(result_tsv, "w", encoding="utf-8") as fh:
-            fh.write("q1\ts1\t80.0\t0.8\t0.8\t1e-10\t100.0\t50")
+            fh.write("q1\ts1\t80.0\t0.8\t0.8\t1e-10\t100.0\t50\t10\t10")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", _fake_run)

@@ -190,6 +190,12 @@ class GlobalJoinStage:
                     target=hit.query_id,
                     identity=hit.identity,
                     coverage=hit.coverage,
+                    bitscore=hit.bitscore,
+                    # source=rep_gene.gene_id 对应 hit.subject_id(本基因组局部代表
+                    # 是 search 调用的 subject 方), target=hit.query_id 对应
+                    # 全局库代表(query 方), 为未来 MCL 权重归一化预留(2026-10-02 与用户确认)。
+                    source_length=hit.subject_length,
+                    target_length=hit.query_length,
                 )
             )
 

@@ -55,6 +55,10 @@ class MockAligner:
             evalue=0.0 if ratio == 1.0 else 1e-3 * (1.0 - ratio + 1e-9),
             bitscore=ratio * 100.0,
             alignment_length=alignment_length,
+            # Mock 场景下无真实比对工具可取 qlen/tlen, 直接用 Gene.length
+            # (2026-10-02 与用户确认, 为未来 MCL 权重归一化预留数据)。
+            query_length=query.length,
+            subject_length=subject.length,
         )
 
     def align_all_vs_all(self, genes: Sequence[Gene]) -> List[AlignmentResult]:

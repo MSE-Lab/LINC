@@ -25,11 +25,15 @@ def _gene(gene_id: str, genome_id: str, length: int = 100) -> Gene:
     return Gene(gene_id=gene_id, genome_id=genome_id, length=length)
 
 
-def _hit(a: str, b: str, identity: float = 1.0, coverage: float = 1.0, bitscore: float = 150.0) -> AlignmentResult:
+def _hit(
+    a: str, b: str, identity: float = 1.0, coverage: float = 1.0, bitscore: float = 150.0,
+    query_length: int = 100, subject_length: int = 100,
+) -> AlignmentResult:
     return AlignmentResult(
         query_id=a, subject_id=b, identity=identity,
         query_cover=coverage, subject_cover=coverage,
         evalue=1e-50, bitscore=bitscore, alignment_length=100,
+        query_length=query_length, subject_length=subject_length,
     )
 
 
@@ -200,6 +204,70 @@ def test_single_genome_cluster_skips_cross_genome_completion():
     result = stage.run(genomes, intra_results, incremental_result)
 
     assert frozenset(("A|1", "A|2")) in {frozenset((e.source, e.target)) for e in result.edges}
+
+
+def test_full_mode_edges_carry_source_target_length():
+    """补边产生的 SSNEdge 应携带 source_length/target_length(为未来 MCL
+    权重归一化预留, 2026-10-02 与用户确认), 且与实际 gene_id 对应的长度一致
+    (而非固定取 query/subject 某一侧)。
+    """
+    a1 = _gene("A|1", "A", length=100)
+    a2 = _gene("A|2", "A", length=120)
+    b1 = _gene("B|1", "B", length=150)
+    b2 = _gene("B|2", "B", length=170)
+    genomes = {
+        "A": Genome(genome_id="A", file_path="a.faa", genes=[a1, a2]),
+        "B": Genome(genome_id="B", file_path="b.faa", genes=[b1, b2]),
+    }
+    intra_results = {
+        "A": GenomeIntraResult(
+            genome_id="A",
+            local_clusters=[LocalCluster(
+                cluster_id="A|cluster_0", member_ids={"A|1", "A|2"},
+                representative_ids=["A|1"], is_orphan=False,
+            )],
+            local_representatives=["A|1"],
+            n_genes=2, n_clusters=1, n_representatives=1,
+            pairwise_hits=[_hit("A|1", "A|2", query_length=100, subject_length=120)],
+            genome_index=[a1, a2],
+        ),
+        "B": GenomeIntraResult(
+            genome_id="B",
+            local_clusters=[LocalCluster(
+                cluster_id="B|cluster_0", member_ids={"B|1", "B|2"},
+                representative_ids=["B|1"], is_orphan=False,
+            )],
+            local_representatives=["B|1"],
+            n_genes=2, n_clusters=1, n_representatives=1,
+            pairwise_hits=[_hit("B|1", "B|2", query_length=150, subject_length=170)],
+            genome_index=[b1, b2],
+        ),
+    }
+    global_lib = GlobalRepresentativeLibrary(
+        clusters=[GlobalCluster(
+            cluster_id="global|cluster_0",
+            representative_ids={"A|1", "B|1"},
+            member_ids={"A|1", "A|2", "B|1", "B|2"},
+            active=True,
+        )]
+    )
+    incremental_result = IncrementalResult(
+        global_lib=global_lib,
+        ssn_edges={SSNEdge(source="A|1", target="B|1", identity=1.0, coverage=1.0)},
+    )
+
+    stage = SSNBuilderStage(aligner=MockAligner(), edge_completion_mode="full")
+    result = stage.run(genomes, intra_results, incremental_result)
+
+    edges_by_pair = {frozenset((e.source, e.target)): e for e in result.edges}
+
+    # 同基因组内(免费复用 pairwise_hits)的代表-成员边, 长度应与 hit 一致
+    rep_member_a = edges_by_pair[frozenset(("A|1", "A|2"))]
+    assert {rep_member_a.source_length, rep_member_a.target_length} == {100, 120}
+
+    # 跨基因组(真正新比对, 来自 MockAligner 按 Gene.length 填充)的成员-成员边
+    cross_member = edges_by_pair[frozenset(("A|2", "B|2"))]
+    assert {cross_member.source_length, cross_member.target_length} == {120, 170}
 
 
 def test_mega_cluster_warning_is_logged_but_does_not_skip_completion(caplog):
