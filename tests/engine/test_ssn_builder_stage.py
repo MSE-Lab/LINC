@@ -321,9 +321,9 @@ def test_full_mode_uses_persisted_genome_index_not_align_query_vs_subject(monkey
     original_search = aligner.search
     original_align = aligner.align_query_vs_subject
 
-    def _counting_search(query, index):
+    def _counting_search(query, index, tag=None):
         search_calls["n"] += 1
-        return original_search(query, index)
+        return original_search(query, index, tag=tag)
 
     def _counting_align(query, subject):
         align_calls["n"] += 1

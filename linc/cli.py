@@ -333,6 +333,13 @@ def run(
         )
         raise typer.Exit(code=1)
     _validate_cutoff_range("--edge-weight-alpha", edge_weight_alpha)
+    if aligner_backend not in ("mmseqs", "diamond"):
+        typer.secho(
+            f"未知的 --aligner 取值: {aligner_backend}(可选: mmseqs | diamond)",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
     genome_files = discover_fasta_files(input_dir)
     if not genome_files:

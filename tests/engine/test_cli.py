@@ -14,6 +14,11 @@ import linc.cli as cli_module
 from linc.adapters.aligners.mock_adapter import MockAligner
 from linc.adapters.clustering.union_find_adapter import UnionFindClustering
 from linc.cli import app
+# 在模块加载阶段(所有 autouse fixture 尚未运行前)捕获真实的 _build_aligner,
+# 避免测试内部 "from linc.cli import _build_aligner" 在 fixture 已将其
+# monkeypatch 为 MockAligner lambda 之后才读取、从而拿到被替换后的版本
+# (2026-10-02 修复: test_run_invalid_aligner_exits_with_error 曾因此失效)。
+_real_build_aligner = cli_module._build_aligner
 
 runner = CliRunner()
 
@@ -312,9 +317,6 @@ def test_run_invalid_aligner_exits_with_error(tmp_path):
     autouse fixture 注入的 MockAligner, 而是单独 monkeypatch 还原真实
     _build_aligner 行为)。
     """
-    import linc.cli as cli_module
-    from linc.cli import _build_aligner
-
     input_dir = tmp_path / "genomes"
     input_dir.mkdir()
     _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
@@ -322,7 +324,7 @@ def test_run_invalid_aligner_exits_with_error(tmp_path):
 
     import pytest as _pytest
     monkeypatch = _pytest.MonkeyPatch()
-    monkeypatch.setattr(cli_module, "_build_aligner", _build_aligner)
+    monkeypatch.setattr(cli_module, "_build_aligner", _real_build_aligner)
     try:
         result = runner.invoke(
             app,
