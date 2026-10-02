@@ -250,9 +250,9 @@ class ClusteringPort(Protocol):
 | `adapters/aligners/diamond_adapter.py` | `AlignerPort` | 已实现。接口/组织方式与 `mmseqs_adapter.py` 对齐(`build_index`/`search` + 便捷方法),因 diamond 的 `blastp` 可直接以 fasta 作为 query,`search()` 比 mmseqs 更简单(query 侧无需单独建库) |
 | `adapters/aligners/mock_adapter.py` | `AlignerPort` | 测试用,返回预设/随机比对结果,不依赖外部二进制;同样实现了 `build_index`/`search`(索引 handle 直接是基因列表本身,无实际开销) |
 | `adapters/storage/memory_repo.py` | `RepositoryPort` | 纯内存实现,小规模/测试场景,不支持跨进程 resume |
-| `adapters/storage/sqlite_repo.py` | `RepositoryPort` | SQLite 持久化,支持 checkpoint/resume,适合大规模增量场景 |
+| `adapters/storage/file_repo.py` | `RepositoryPort` | **已完成(第8步,2026-10-02)**。与文档原计划的 `sqlite_repo.py` 不同,经与用户确认改为最简单的基于文件(pickle)的持久化方案:每个 Stage 产出序列化为独立文件,存放于 `<output_dir>/.linc_work/state/`,与现有 `mmseqs_db`/`diamond_db` 等索引目录风格一致;支持跨进程 `--resume`/`--append`,`sqlite_repo.py` 本身未实现 |
 | `adapters/clustering/union_find_adapter.py` | `ClusteringPort` | Step2 基因组内聚类用 |
-| `adapters/clustering/mcl_adapter.py` | `ClusteringPort` | 优先尝试 `markov_clustering` Python 库,找不到则 fallback 到系统 `mcl` 命令行 |
+| `adapters/clustering/mcl_adapter.py` | `ClusteringPort` | **已完成**。与用户确认(2026-10-02)不做 `markov_clustering` Python 库 fallback,直接调用用户已安装的系统 `mcl` 命令行(`.abc` 格式输入,`-I` 指定 inflation) |
 
 **Adapter 选择与装配**: 统一在 `config/schema.py` 中声明 `backend` 字段,由一个简单的工厂函数
 (`adapters/factory.py`)根据配置创建对应实例,`engine/` 层只依赖 Port 类型注解,不关心具体实现:
@@ -278,7 +278,6 @@ adapters 子模块**(避免反向依赖)。
 
 ```
 engine/
-├── incremental_engine.py   # IncrementalSSNEngine: 对外统一入口,持有 EventBus 和各 Stage
 ├── genome_load_stage.py    # 对应 v1 Step1
 ├── intra_genome_stage.py   # 对应 v1 Step2 (Union-Find 聚类 + 代表选取)
 ├── global_join_stage.py    # 对应 v1 Step3 (Order-D 排序 + 双阈值决策树,核心)
@@ -286,22 +285,35 @@ engine/
 └── family_refine_stage.py  # 对应 v1 Step6 (MCL 细分)
 ```
 
-#### `IncrementalSSNEngine` 对外接口
+#### 对外统一入口:`pipeline.Pipeline`(取代原计划的 `IncrementalSSNEngine`)
+
+> **与用户确认(2026-10-02,第5步)**: 不单独新建 `engine/incremental_engine.py`。
+> "增量并入"的核心算法已完整实现在 `GlobalJoinStage` 里,"Stage 编排顺序"这件事
+> 直接合并进 `pipeline.py` 的 `Pipeline` 类(见 2.5 节),不再额外设计一层同义的
+> `IncrementalSSNEngine` 外壳。
 
 ```python
-class IncrementalSSNEngine:
+class Pipeline:
     def __init__(
         self,
         aligner: AlignerPort,
-        clustering: ClusteringPort,
+        clustering_for_intra: ClusteringPort,
+        clustering_for_mcl: ClusteringPort,
         repository: RepositoryPort,
-        threshold_policy: ThresholdPolicy,
-        event_bus: Optional[EventBus] = None,
+        config: "PipelineConfig",
     ):
         ...
 
-    def run(self, genome_files: list[str], resume: bool = False) -> "EngineResult":
-        """串联五个 Stage,返回最终 SSN + 家族划分结果"""
+    def run(self, genome_files: list[str]) -> "PipelineResult":
+        """首次完整运行(无历史状态), 依次跑完 5 个 Stage 并逐一持久化"""
+        ...
+
+    def resume(self, genome_files: list[str]) -> "PipelineResult":
+        """从上次中断处接着跑完剩余 Stage(Stage 级别恢复粒度, 见 2.5 节)"""
+        ...
+
+    def append(self, new_genome_files: list[str]) -> "PipelineResult":
+        """把新基因组追加到历史完整结果上(第8步, 2026-10-02)"""
         ...
 ```
 
@@ -397,32 +409,53 @@ class IncrementalSSNEngine:
 
 ---
 
-### 2.5 `pipeline.py` — 声明式 Pipeline + Checkpoint/Resume
+### 2.5 `pipeline.py` — `Pipeline` + Checkpoint/Resume/Append(已完成,第5/8步)
+
+> **实际实现与本文档最初草图(通用 `load_checkpoint("pipeline")`)不同**,经与用户
+> 多轮确认(2026-10-02)改为`RepositoryPort` 按 5 个 Stage 产出类型逐一提供专用
+> `save_*`/`load_*`/`has_*` 方法(而非存一个笼统的 `dict` checkpoint),`Pipeline`
+> 提供 `run`/`resume`/`append` 三个方法,而非 `run(resume: bool)` 这种参数形式:
 
 ```python
-@dataclass
-class StageResult:
-    stage_name: str
-    output: Any
-    event_count: int
-
 class Pipeline:
-    def __init__(self, engine: IncrementalSSNEngine, repository: RepositoryPort):
-        self.engine = engine
-        self.repository = repository
+    def __init__(
+        self,
+        aligner: AlignerPort,
+        clustering_for_intra: ClusteringPort,
+        clustering_for_mcl: ClusteringPort,
+        repository: RepositoryPort,
+        config: "PipelineConfig",
+    ):
+        ...
 
-    def run(self, genome_files: list[str], resume: bool = False) -> "EngineResult":
-        checkpoint = self.repository.load_checkpoint("pipeline") if resume else None
-        start_stage = checkpoint["completed_stage"] + 1 if checkpoint else 0
-        # 依次执行 engine 内部 5 个 stage,每完成一个 stage 调用
-        # self.repository.save_checkpoint("pipeline", {...}) 落盘进度
+    def run(self, genome_files: list[str]) -> "PipelineResult":
+        """首次完整运行: 依次跑完 5 个 Stage, 每个 Stage 跑完后整体持久化一次"""
+        ...
+
+    def resume(self, genome_files: list[str]) -> "PipelineResult":
+        """按 genomes->intra_results->join_result->complete_ssn->families 顺序,
+        依次用 has_*() 判断某 Stage 是否已持久化过: 已持久化的直接 load_*() 复用,
+        未持久化的才调用对应 Stage 重新跑"""
+        ...
+
+    def append(self, new_genome_files: list[str]) -> "PipelineResult":
+        """新基因组只跑 GenomeLoadStage+IntraGenomeStage, 再与历史 join_result
+        接续运行 GlobalJoinStage; SSNBuilderStage/FamilyRefineStage 对合并后的
+        完整数据全量重跑(不做增量优化)"""
         ...
 ```
 
-**Resume 语义**: 以"Stage 级别"为最小恢复粒度(不做到"基因组级别"的细粒度续跑,
-后者复杂度过高且收益有限)。即:如果失败发生在 `GlobalJoinStage` 处理第 50 个基因组时,
-resume 后会**重新执行整个 `GlobalJoinStage`**,而不是从第 50 个基因组继续
-—— 这是为了保证"一次比对全局复用"等不变量不被断点逻辑破坏,优先保证正确性而非恢复效率。
+**Resume/Checkpoint 粒度(已与用户核实确认, 2026-10-02)**: 以"**Stage 级别**"为
+恢复粒度,且是 Stage **内部循环全部基因组跑完后才整体持久化一次**,不是"基因组
+级别"续跑。具体表现为: `_run_intra()`/`_run_join()` 内部各是一个对全部基因组
+逐一处理的循环, 只有循环整体结束才调用一次 `save_intra_results()`/
+`save_join_result()`; 若失败发生在 `IntraGenomeStage`(或 `GlobalJoinStage`)
+处理第 N 个基因组(N 小于总数)时, resume 后会**重新执行该 Stage 涉及的全部
+基因组**, 而不是只补做剩下未完成的那些 —— 这是为了保证正确性优先、避免细粒度
+续跑引入的额外状态管理复杂度, 但 Stage 与 Stage 之间的断点是有效的(已完整持久化
+的 Stage 不会被重新执行)。细粒度到基因组级别的 checkpoint 仍是一项未落地的
+待办(见第7节开放问题), 如需要应改造各 Stage 内部循环 + `RepositoryPort`/
+`FileRepository` 接口粒度。
 
 ---
 
@@ -516,21 +549,38 @@ def run(
     output_dir: str = typer.Option("output", "-o", "--output-dir"),
     cutoff_i: float = typer.Option(0.5, "--cutoff-i"),
     cutoff_ii: float = typer.Option(0.8, "--cutoff-ii"),
+    cutoff_c: float = typer.Option(0.0, "--cutoff-c"),
+    cov_mode: int = typer.Option(0, "--cov-mode"),      # 0双向|1subject|2query
     max_per_cluster: int = typer.Option(5, "--max-per-cluster"),
-    backend: str = typer.Option("mock", "--backend"),  # mock | mmseqs | diamond
+    aligner: str = typer.Option("mmseqs", "--aligner"),  # mmseqs | diamond(mock不暴露, 仅测试用)
     threads: int = typer.Option(0, "--threads"),       # 0 = 不显式指定, 使用工具自身默认值
+    edge_completion_mode: str = typer.Option("representative_member", "--edge-completion-mode"),
+    mega_cluster_warning_threshold: int = typer.Option(0, "--mega-cluster-warning-threshold"),
+    inflation: float = typer.Option(1.5, "--inflation"),
+    edge_weight_mode: str = typer.Option("identity_x_coverage", "--edge-weight-mode"),
+    edge_weight_alpha: float = typer.Option(0.5, "--edge-weight-alpha"),
+    resume: bool = typer.Option(False, "--resume"),     # 与 -a/--append 互斥
+    append: str = typer.Option(None, "-a", "--append"), # 追加新基因组目录(支持链式多次追加)
     verbose: bool = typer.Option(False, "--verbose"),
 ) -> None:
-    """运行 GenomeLoadStage + IntraGenomeStage + GlobalJoinStage,
-    输出 load_summary.json / intra_summary.json / join_summary.json。"""
+    """构造 Pipeline 并调用 run()/resume()/append(),
+    输出 load/intra/join/ssn/family_summary.json + Orthogroups.txt。"""
     ...
 ```
 
-> 实际未新增 `resume` 子命令(第5步 pipeline/断点续跑尚未实现);也未采用 `config.yaml` 配置
-> 文件驱动方式,改为全部参数通过 CLI Option 直接传入,待第6步 `config/schema.py` 真正落地后
-> 再评估是否需要配置文件入口。
-> `--backend mmseqs|diamond` 时,`work_dir` 固定为 `<output_dir>/.linc_work/<backend>_db/`,
-> 随 `-o` 参数变化,运行期间不自动清理(贴合断点续跑/增量添加数据的定位)。
+> **实际实现较本文档最初草图大幅扩展(第6/8步, 2026-10-02)**: `--resume`(开关)
+> 与 `-a`/`--append <目录>`(接收路径, 非开关)均已实现并接入, 二者互斥; 两者均
+> 要求 `-i` 与历史 `input_signature`(discover 出的文件名集合, 非路径字符串)
+> 一致, 否则报错退出; `-a` 额外要求历史 5 个 Stage 产出均已完整持久化(否则
+> 提示先用 `--resume` 补全)。未采用 `config.yaml` 配置文件驱动方式, 全部参数
+> 通过 CLI Option 直接传入(`config/schema.py` 的 dataclass+validate 仍未独立
+> 抽取, 校验逻辑现状直接写在 `cli.py` 的 `run` 函数体内)。
+> `--backend` 已按用户要求重命名为 `--aligner`, 默认值由 `mock` 改为 `mmseqs`,
+> 取值收窄为 `mmseqs|diamond`(`MockAligner` 保留仅供测试内部构造夹具使用, 不再
+> 作为 CLI 可选项暴露)。
+> `--aligner mmseqs|diamond` 时,`work_dir` 固定为 `<output_dir>/.linc_work/<aligner>_db/`,
+> 随 `-o` 参数变化,运行期间不自动清理(贴合断点续跑/增量添加数据的定位); 持久化
+> 状态(`FileRepository`)存放于 `<output_dir>/.linc_work/state/`。
 
 ---
 
@@ -546,10 +596,7 @@ config/schema.py (LINCSettings.validate())
 adapters/factory.py  → 创建 AlignerPort / ClusteringPort / RepositoryPort 具体实例
   │
   ▼
-engine/incremental_engine.py (IncrementalSSNEngine, 注入上述三个 Port)
-  │
-  ▼
-pipeline.py (Pipeline.run, 支持 resume)
+pipeline.py (Pipeline, 注入上述三个 Port, 提供 run/resume/append)
   │
   ├─ GenomeLoadStage
   ├─ IntraGenomeStage        (可并行: 基因组间)
@@ -558,8 +605,11 @@ pipeline.py (Pipeline.run, 支持 resume)
   └─ FamilyRefineStage       (可并行: 连通分量间)
   │
   ▼
-EngineResult { ortholog_families, ssn_edges, global_library, run_summary }
+PipelineResult { genomes, intra_results, join_result, complete_ssn, families }
 ```
+
+> `engine/incremental_engine.py` 未单独新建, "Stage 编排顺序"这件事已直接合并进
+> `pipeline.py` 的 `Pipeline` 类(见 2.4/2.5 节, 与用户确认, 2026-10-02)。
 
 ---
 
@@ -582,12 +632,12 @@ EngineResult { ortholog_families, ssn_edges, global_library, run_summary }
 3. `adapters/aligners/mock_adapter.py` + `adapters/clustering/union_find_adapter.py`(让 engine 尽早可测)
 4. `engine/genome_load_stage.py` → `intra_genome_stage.py` → `global_join_stage.py`
    → `ssn_builder_stage.py` → `family_refine_stage.py`(严格按流水线顺序实现并逐个写单测)
-5. `engine/incremental_engine.py` + `pipeline.py`(串联已实现的 Stage)
-6. `adapters/storage/memory_repo.py`(先用内存版跑通全流程)
-7. `config/schema.py` + `cli.py`(让整个系统可以通过命令行驱动)
+5. `pipeline.py`(串联已实现的 Stage, 不单独建 `incremental_engine.py`)— **已完成**
+6. `adapters/storage/memory_repo.py`(先用内存版跑通全流程)— **已完成**
+7. `config/schema.py` + `cli.py`(让整个系统可以通过命令行驱动)— `cli.py` 已完成, `config/schema.py` 未独立抽取(校验逻辑现状在 `cli.py` 内)
 8. `adapters/aligners/mmseqs_adapter.py`(接入真实比对引擎,替换 Mock)— **已完成**
-9. `adapters/storage/sqlite_repo.py` + Checkpoint/Resume 完整验证 — 未开始
-10. `adapters/aligners/diamond_adapter.py`(**已完成**)+ `adapters/clustering/mcl_adapter.py`(未开始,补齐可选后端)
+9. `adapters/storage/file_repo.py`(基于pickle文件, 取代原计划的 `sqlite_repo.py`)+ `--resume`/`--append` 完整验证 — **已完成**(2026-10-02)
+10. `adapters/aligners/diamond_adapter.py` + `adapters/clustering/mcl_adapter.py`(调用系统 `mcl` 命令, 不做 `markov_clustering` 库 fallback)— **均已完成**
 
 ---
 
@@ -639,5 +689,7 @@ EngineResult { ortholog_families, ssn_edges, global_library, run_summary }
 ## 7. 开放问题(需后续迭代中明确)
 
 - Checkpoint 的"Stage 级别"粒度是否足够?若未来基因组规模达到数千级,是否需要升级为更细粒度的恢复策略?
+  (2026-10-02 与用户核实确认: 当前实现确实是 Stage 内部全部基因组跑完才整体持久化一次,
+  中途中断会导致该 Stage 涉及的全部基因组重新处理一遍, 细粒度到基因组级别的 checkpoint 仍待后续决定是否实现)
 - `EventBus` 是否需要支持异步/多进程场景(当前默认假设单进程内存事件总线)?
 - `typer` vs `argparse` 的最终选择待定,取决于是否接受新增依赖。

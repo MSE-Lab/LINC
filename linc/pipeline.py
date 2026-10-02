@@ -149,7 +149,11 @@ class Pipeline:
         )
         return ssn_stage.run(loaded_genomes, intra_results, join_result)
 
-    def _run_family(self, complete_ssn: CompleteSSN) -> List[OrthologFamily]:
+    def _run_family(
+        self,
+        complete_ssn: CompleteSSN,
+        intra_results: Dict[str, GenomeIntraResult],
+    ) -> List[OrthologFamily]:
         config = self._config
         family_stage = FamilyRefineStage(
             clustering=self._clustering_for_mcl,
@@ -157,7 +161,16 @@ class Pipeline:
             edge_weight_mode=config.edge_weight_mode,
             edge_weight_alpha=config.edge_weight_alpha,
         )
-        return family_stage.run(complete_ssn)
+        # 传入全部基因id, 以便零边的孤立基因也能被显式补成图节点, 避免在
+        # nx.connected_components() 中被静默忽略而从最终家族结果中消失
+        # (2026-10-02 修复, 详见 family_refine_stage.py 模块docstring)。
+        all_gene_ids = {
+            gene_id
+            for intra in intra_results.values()
+            for cluster in intra.local_clusters
+            for gene_id in cluster.member_ids
+        }
+        return family_stage.run(complete_ssn, all_gene_ids=all_gene_ids)
 
     def run(self, genome_files: List[str]) -> PipelineResult:
         """首次完整运行(无历史状态), 依次跑完 5 个 Stage 并逐一持久化。"""
@@ -179,7 +192,7 @@ class Pipeline:
         complete_ssn = self._run_ssn(loaded_genomes, intra_results, join_result)
         self._repository.save_complete_ssn(complete_ssn)
 
-        families = self._run_family(complete_ssn)
+        families = self._run_family(complete_ssn, intra_results)
         self._repository.save_families(families)
 
         return PipelineResult(
@@ -227,7 +240,7 @@ class Pipeline:
         if repo.has_families():
             families = repo.load_families()
         else:
-            families = self._run_family(complete_ssn)
+            families = self._run_family(complete_ssn, intra_results)
             repo.save_families(families)
 
         return PipelineResult(
@@ -276,7 +289,7 @@ class Pipeline:
         )
 
         complete_ssn = self._run_ssn(merged_loaded, merged_intra_results, join_result)
-        families = self._run_family(complete_ssn)
+        families = self._run_family(complete_ssn, merged_intra_results)
 
         # 注意: `-i` 对应的 input_signature 不随 append 变化(`-i` 始终代表
         # 历史基础数据集, 只有 `-a` 每次追加的新目录才变化, 2026-10-02 与

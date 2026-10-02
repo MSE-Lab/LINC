@@ -14,6 +14,13 @@
        - 其余连通分量: 调用 `ClusteringPort.cluster(subgraph, inflation=...)`
          (生产环境传入 `MCLClustering`), 得到的每个子簇生成一个
          `OrthologFamily`。
+       - 注意(2026-10-02 修复): 图的节点不能只靠 `CompleteSSN.edges` 隐式
+         添加 —— 若某基因在局部簇内是孤儿(无其他成员)且全局比对中也没有
+         找到任何可连的代表, 它在 edges 里完全不出现, 若不显式补充节点,
+         会被 `nx.connected_components()` 彻底忽略、从最终结果中静默消失
+         (而不是被当作一个合法的 size=1 独立家族保留)。`run()` 因此新增
+         `all_gene_ids` 参数, 用于在构建图后把全部基因显式 `add_node()`
+         补齐。
     4. `edge_density` 按标准图密度公式计算(对每个家族的诱导子图):
        `2 * E / (N * (N-1))`, N<=1 时为 0.0(与用户确认, 2026-10-02)。
     5. `family_id` 采用 OrthoFinder 风格编号 `OG0000000`(与用户确认),
@@ -22,7 +29,7 @@
        延续项目一贯的"结果排序以消除非确定性来源"原则)。
 """
 import logging
-from typing import List
+from typing import Iterable, List, Optional
 
 import networkx as nx
 
@@ -47,8 +54,12 @@ class FamilyRefineStage:
         self._edge_weight_mode = edge_weight_mode
         self._edge_weight_alpha = edge_weight_alpha
 
-    def run(self, complete_ssn: CompleteSSN) -> List[OrthologFamily]:
-        graph = self._build_graph(complete_ssn)
+    def run(
+        self,
+        complete_ssn: CompleteSSN,
+        all_gene_ids: Optional[Iterable[str]] = None,
+    ) -> List[OrthologFamily]:
+        graph = self._build_graph(complete_ssn, all_gene_ids)
 
         # 按最小节点排序连通分量, 保证遍历顺序跨运行确定(graph 的节点/边
         # 插入顺序已经按排序后的边构建, 这里再显式排序进一步保证稳妥)。
@@ -96,7 +107,11 @@ class FamilyRefineStage:
         )
         return families
 
-    def _build_graph(self, complete_ssn: CompleteSSN) -> nx.Graph:
+    def _build_graph(
+        self,
+        complete_ssn: CompleteSSN,
+        all_gene_ids: Optional[Iterable[str]] = None,
+    ) -> nx.Graph:
         # 按 (source, target) 排序后再插入, 消除 CompleteSSN.edges(set)
         # 遍历顺序的非确定性(与 mmseqs/diamond adapter 结果排序的既有原则
         # 一致), 保证后续连通分量/节点插入顺序跨运行确定。
@@ -110,6 +125,14 @@ class FamilyRefineStage:
                 edge.source, edge.target,
                 weight=edge.weight(self._edge_weight_mode, self._edge_weight_alpha),
             )
+        # 显式补全全部基因节点(2026-10-02 修复): 零边的孤立基因(局部无其他
+        # 成员、全局也未找到任何可连代表)不会通过 add_edge 被加入图中,
+        # 若不补齐会在 nx.connected_components() 中彻底消失。按排序后的
+        # gene_id 依次 add_node, 保证节点插入顺序跨运行确定。
+        if all_gene_ids is not None:
+            for gene_id in sorted(all_gene_ids):
+                if gene_id not in graph:
+                    graph.add_node(gene_id)
         return graph
 
     @staticmethod

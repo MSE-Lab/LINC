@@ -171,3 +171,47 @@ def test_empty_complete_ssn_produces_no_families():
     families = stage.run(complete_ssn)
 
     assert families == []
+
+
+def test_gene_with_zero_edges_anywhere_is_not_silently_dropped():
+    """2026-10-02 修复: 若某基因在 CompleteSSN.edges 中完全不出现(局部
+    孤儿+全局也未找到任何可连代表), 传入 all_gene_ids 后应被显式补成
+    size=1 的独立家族, 而不是在 nx.connected_components() 中彻底消失。
+    """
+    complete_ssn = CompleteSSN(edges={_edge("A", "B")})
+    stage = FamilyRefineStage(clustering=_OneClusterPerComponent())
+
+    # "C" 从未出现在任何边里, 但仍属于全部基因集合。
+    families = stage.run(complete_ssn, all_gene_ids={"A", "B", "C"})
+
+    assert len(families) == 2
+    member_sets = {frozenset(f.member_genes) for f in families}
+    assert member_sets == {frozenset({"A", "B"}), frozenset({"C"})}
+    lone_family = next(f for f in families if f.member_genes == {"C"})
+    assert lone_family.edge_density == pytest.approx(0.0)
+
+
+def test_all_gene_ids_omitted_keeps_backward_compatible_behavior():
+    """未传入 all_gene_ids 时(默认None), 行为与修复前完全一致:
+    零边基因不会被补充, 保持向后兼容。"""
+    complete_ssn = CompleteSSN(edges={_edge("A", "B")})
+    stage = FamilyRefineStage(clustering=_OneClusterPerComponent())
+
+    families = stage.run(complete_ssn)
+
+    assert len(families) == 1
+    assert families[0].member_genes == {"A", "B"}
+
+
+def test_multiple_isolated_genes_each_become_own_size_one_family():
+    """多个零边孤立基因应分别成为各自独立的 size=1 家族, 而不是被合并
+    成一个家族或互相干扰。"""
+    complete_ssn = CompleteSSN(edges=set())
+    stage = FamilyRefineStage(clustering=_OneClusterPerComponent())
+
+    families = stage.run(complete_ssn, all_gene_ids={"X", "Y", "Z"})
+
+    assert len(families) == 3
+    member_sets = {frozenset(f.member_genes) for f in families}
+    assert member_sets == {frozenset({"X"}), frozenset({"Y"}), frozenset({"Z"})}
+    assert all(f.edge_density == pytest.approx(0.0) for f in families)
