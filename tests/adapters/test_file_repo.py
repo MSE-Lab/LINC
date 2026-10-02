@@ -1,4 +1,7 @@
 """FileRepository 单元测试(2026-10-02, 第8步: 持久化存储 + resume/append)。"""
+import gzip
+import pickle
+
 import pytest
 
 from linc.adapters.storage.file_repo import FileRepository, StateCorruptedError
@@ -89,3 +92,56 @@ def test_save_uses_atomic_replace_leaves_no_tmp_file(tmp_path):
     repo.save_genomes({"g1": Genome(genome_id="g1", file_path="g1.faa")})
     assert not (state_dir / "genomes.pkl.tmp").exists()
     assert (state_dir / "genomes.pkl").exists()
+
+
+def test_saved_state_file_is_gzip_compressed(tmp_path):
+    """2026-10-02 方案A: 状态文件应以 gzip 压缩写入, 而非原始 pickle。"""
+    state_dir = tmp_path / "state"
+    repo = FileRepository(str(state_dir))
+    # 构造一段高重复度的长序列, 验证压缩后文件体积确实小于未压缩pickle。
+    long_sequence = "MK" * 5000
+    genome = Genome(
+        genome_id="g1",
+        file_path="g1.faa",
+        genes=[],
+    )
+    repo.save_genomes({"g1": genome, "_padding": long_sequence})
+
+    path = state_dir / "genomes.pkl"
+    assert path.exists()
+    # 文件头应是 gzip magic number, 而不是 pickle 的 opcode。
+    with open(path, "rb") as fh:
+        magic = fh.read(2)
+    assert magic == b"\x1f\x8b"
+
+    raw_pickle_size = len(pickle.dumps({"g1": genome, "_padding": long_sequence}))
+    compressed_size = path.stat().st_size
+    assert compressed_size < raw_pickle_size
+
+
+def test_load_falls_back_to_plain_pickle_for_legacy_uncompressed_files(tmp_path):
+    """向后兼容: 本次改动之前写入的旧版非压缩pickle文件仍应能正常加载,
+    不应被误判为损坏。"""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    genome = Genome(genome_id="g1", file_path="g1.faa")
+    legacy_path = state_dir / "genomes.pkl"
+    with open(legacy_path, "wb") as fh:
+        pickle.dump({"g1": genome}, fh)
+
+    repo = FileRepository(str(state_dir))
+    loaded = repo.load_genomes()
+    assert loaded["g1"].genome_id == "g1"
+
+
+def test_gzip_roundtrip_matches_manual_gzip_write(tmp_path):
+    """确认 FileRepository 写入的文件能被标准 gzip 工具正常解压, 不是自定义格式。"""
+    state_dir = tmp_path / "state"
+    repo = FileRepository(str(state_dir))
+    result = IncrementalResult(cluster_counter=7)
+    repo.save_join_result(result)
+
+    path = state_dir / "join_result.pkl"
+    with gzip.open(path, "rb") as fh:
+        obj = pickle.load(fh)
+    assert obj.cluster_counter == 7

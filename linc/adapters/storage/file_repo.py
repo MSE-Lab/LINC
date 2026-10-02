@@ -7,7 +7,16 @@
 
 这些对象只是程序内部中间状态, 不要求人类可读, 因此选用 pickle(而非 json)
 以避免为 dataclass/Set 等结构额外编写编解码器。
+
+存储体积优化(2026-10-02, 与用户确认方案A): 大规模(数百至上千基因组)场景下
+`genomes.pkl`/`intra_results.pkl` 体积可能较大(前者存有全部基因序列, 后者
+存有 IntraGenomeStage 全对全比对的全部原始结果以供下游免费复用), 为降低
+磁盘占用, 所有状态文件统一改为 gzip 压缩写入(序列/比对结果等高重复度文本
+数据压缩比通常可达 3-4 倍), 不改变任何读取逻辑或数据结构本身。读取时优先
+按 gzip 解压, 若文件是本次改动之前写入的旧版非压缩 pickle 文件, 自动回退为
+直接 pickle 读取, 保持向后兼容(不强制用户手动迁移已有的 `.linc_work/state/`)。
 """
+import gzip
 import logging
 import os
 import pickle
@@ -49,9 +58,11 @@ class FileRepository:
         return os.path.join(self._state_dir, self._FILES[key])
 
     def _save(self, key: str, obj) -> None:
+        # gzip 压缩写入(2026-10-02, 方案A): 大规模场景下显著降低磁盘占用,
+        # 不改变整体"写临时文件再原子替换"的落盘语义。
         path = self._path(key)
         tmp_path = path + ".tmp"
-        with open(tmp_path, "wb") as fh:
+        with gzip.open(tmp_path, "wb") as fh:
             pickle.dump(obj, fh)
         os.replace(tmp_path, path)
 
@@ -60,8 +71,20 @@ class FileRepository:
         if not os.path.exists(path):
             return None
         try:
-            with open(path, "rb") as fh:
+            with gzip.open(path, "rb") as fh:
                 return pickle.load(fh)
+        except gzip.BadGzipFile:
+            # 向后兼容(2026-10-02引入gzip压缩之前写入的旧版非压缩pickle文件):
+            # 不视为损坏, 直接按原始pickle格式读取。
+            try:
+                with open(path, "rb") as fh:
+                    return pickle.load(fh)
+            except Exception as exc:  # noqa: BLE001 - 任何反序列化失败都视为损坏
+                logger.error("持久化状态文件损坏, 无法反序列化: %s", path, exc_info=True)
+                raise StateCorruptedError(
+                    f"持久化状态文件损坏, 无法反序列化: {path}; 请检查 .linc_work/state/ "
+                    f"目录是否被意外修改/截断, 不建议直接删除后重跑(会丢失已完成的工作)。"
+                ) from exc
         except Exception as exc:  # noqa: BLE001 - 任何反序列化失败都视为损坏
             logger.error("持久化状态文件损坏, 无法反序列化: %s", path, exc_info=True)
             raise StateCorruptedError(
