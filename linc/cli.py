@@ -45,6 +45,7 @@ from .engine.genome_load_stage import (
 )
 from .adapters.storage.file_repo import FileRepository, StateCorruptedError
 from .pipeline import ConfigMismatchError, IndexMissingError, Pipeline, PipelineConfig
+from .utils.lock import PipelineLockedError, acquire_pipeline_lock
 
 app = typer.Typer(help="LINC: 增量基因组比较构建 SSN 并通过 MCL 细分蛋白质家族。")
 
@@ -397,206 +398,223 @@ def run(
         )
         raise typer.Exit(code=1)
 
+    # 工程审查问题7(2026-10-03 与用户确认): 并发跑同一 -o 目录会互相破坏
+    # 中间文件/state(search()里的rmtree+重建、FileRepository._save()的
+    # .tmp+os.replace均无并发保护)。在触及 output_dir 下任何文件(包括
+    # _build_aligner/_build_clustering 创建的索引工作目录)之前, 先以
+    # 非阻塞方式获取该目录的独占锁; 若已被另一进程占用, 立即报错退出,
+    # 不排队等待(互斥场景而非排队场景)。整个 pipeline 执行过程持有该锁
+    # 直到命令结束(正常/异常退出都在 finally 里释放)。
     try:
-        aligner = _build_aligner(aligner_backend, threads, output_dir)
-    except RuntimeError as exc:
-        # 工程审查问题4(2026-10-03 与用户确认): 缺失外部二进制(如 mmseqs/
-        # diamond 未安装)时, 构造函数会抛出 RuntimeError, 这里统一兜底为
-        # 干净的报错退出, 而不是让用户看到未捕获的 Python traceback。
+        lock_cm = acquire_pipeline_lock(output_dir)
+        lock_cm.__enter__()
+    except PipelineLockedError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
-    if aligner is None:
-        typer.secho(
-            f"未知的 --aligner 取值: {aligner_backend}(可选: mmseqs | diamond)",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    logger.info("比对后端: %s", aligner_backend)
 
-    state_dir = os.path.join(output_dir, ".linc_work", "state")
-    repository = FileRepository(state_dir)
-
-    if resume or append_dir is not None:
+    try:
         try:
-            historical_signature = repository.load_input_signature()
-        except StateCorruptedError as exc:
+            aligner = _build_aligner(aligner_backend, threads, output_dir)
+        except RuntimeError as exc:
+            # 工程审查问题4(2026-10-03 与用户确认): 缺失外部二进制(如 mmseqs/
+            # diamond 未安装)时, 构造函数会抛出 RuntimeError, 这里统一兜底为
+            # 干净的报错退出, 而不是让用户看到未捕获的 Python traceback。
             typer.secho(str(exc), fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
-        if historical_signature is None:
+        if aligner is None:
             typer.secho(
-                f"-o {output_dir} 下未找到历史运行记录(.linc_work/state), "
-                "--resume/-a 需要先有一次 `linc run` 的历史运行。",
-                fg=typer.colors.RED, err=True,
+                f"未知的 --aligner 取值: {aligner_backend}(可选: mmseqs | diamond)",
+                fg=typer.colors.RED,
+                err=True,
             )
             raise typer.Exit(code=1)
-        # 兼容旧版签名格式(纯 basename 字符串列表): 旧格式只能做 basename
-        # 级别比对(无法感知内容是否被替换), 新格式为 (basename, size, mtime)
-        # 三元组列表, 能进一步拦住"同名但内容已变"的误用场景(2026-10-03,
-        # 第二轮漏洞"签名只比 basename"修复, 与用户权衡性能后采用 大小+mtime
-        # 而非完整内容 MD5 的折中方案)。
-        is_legacy_format = bool(historical_signature) and isinstance(historical_signature[0], str)
-        if is_legacy_format:
-            current_signature = sorted(os.path.basename(f) for f in genome_files)
-            logger.warning(
-                "历史 input_signature 为旧版格式(仅 basename), 本次校验退化为"
-                "仅比对文件名, 无法感知文件内容是否被替换; 建议重新完整运行一次"
-                "以升级签名格式。"
-            )
-        else:
-            current_signature = build_input_signature(genome_files)
-        if current_signature != historical_signature:
-            typer.secho(
-                f"-i {input_dir} 下发现的基因组文件集合与历史记录不一致"
-                "(--resume/-a 要求 -i 始终指向同一份历史基础数据集, 不允许变化): "
-                f"历史={historical_signature}, 本次={current_signature}",
-                fg=typer.colors.RED, err=True,
-            )
-            raise typer.Exit(code=1)
+        logger.info("比对后端: %s", aligner_backend)
 
-    if append_dir is not None:
-        missing_stages = [
-            name for name, has in (
-                ("genomes", repository.has_genomes()),
-                ("intra_results", repository.has_intra_results()),
-                ("join_result", repository.has_join_result()),
-                ("complete_ssn", repository.has_complete_ssn()),
-                ("families", repository.has_families()),
-            ) if not has
-        ]
-        if missing_stages:
-            typer.secho(
-                f"-a/--append 要求 -o {output_dir} 下是一次完整运行的结果, "
-                f"但缺少以下 Stage 的历史产出: {', '.join(missing_stages)}; "
-                "请先用 --resume 补全上次运行, 再执行 --append。",
-                fg=typer.colors.RED, err=True,
-            )
-            raise typer.Exit(code=1)
+        state_dir = os.path.join(output_dir, ".linc_work", "state")
+        repository = FileRepository(state_dir)
 
-    try:
-        clustering_for_mcl = _build_clustering(output_dir)
-    except RuntimeError as exc:
-        # 工程审查问题4(2026-10-03 与用户确认): 缺失外部二进制(如 mcl 未
-        # 安装)时, 构造函数会抛出 RuntimeError, 这里统一兜底为干净的报错
-        # 退出, 而不是让用户看到未捕获的 Python traceback。
-        typer.secho(str(exc), fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
-
-    pipeline = Pipeline(
-        aligner=aligner,
-        clustering_for_intra=UnionFindClustering(),
-        clustering_for_mcl=clustering_for_mcl,
-        repository=repository,
-        config=PipelineConfig(
-            cutoff_i=cutoff_i,
-            cutoff_ii=cutoff_ii,
-            cutoff_c=cutoff_c,
-            cov_mode=cov_mode,
-            max_per_cluster=max_per_cluster,
-            edge_completion_mode=edge_completion_mode,
-            mega_cluster_warning_threshold=mega_cluster_warning_threshold,
-            inflation=inflation,
-            edge_weight_mode=edge_weight_mode,
-            edge_weight_alpha=edge_weight_alpha,
-            keep_intermediate=keep_intermediate,
-        ),
-    )
-
-    try:
-        if append_dir is not None:
-            new_genome_files = discover_fasta_files(append_dir)
-            if not new_genome_files:
-                # 工程审查问题6(2026-10-03 与用户确认): -a/--append 指向
-                # 空目录(或目录内无受支持的FASTA文件)时, 此前会"成功"退出
-                # 但实际未追加任何内容, 容易让用户误以为追加生效; 改为报错。
+        if resume or append_dir is not None:
+            try:
+                historical_signature = repository.load_input_signature()
+            except StateCorruptedError as exc:
+                typer.secho(str(exc), fg=typer.colors.RED, err=True)
+                raise typer.Exit(code=1)
+            if historical_signature is None:
                 typer.secho(
-                    f"-a/--append 指向的目录下未发现任何 FASTA 文件"
-                    f"(*.fasta/*.fa/*.faa): {append_dir}",
+                    f"-o {output_dir} 下未找到历史运行记录(.linc_work/state), "
+                    "--resume/-a 需要先有一次 `linc run` 的历史运行。",
                     fg=typer.colors.RED, err=True,
                 )
                 raise typer.Exit(code=1)
-            logger.info(
-                "追加模式(--append): 发现 %d 个新基因组候选文件(目录=%s)",
-                len(new_genome_files), append_dir,
-            )
-            result = pipeline.append(new_genome_files, force=force)
-        elif resume:
-            logger.info("断点续跑(--resume): 共 %d 个候选文件", len(genome_files))
-            result = pipeline.resume(genome_files, force=force)
-        else:
-            logger.info("开始加载基因组, 共发现 %d 个候选文件", len(genome_files))
-            result = pipeline.run(genome_files)
-    except GenomeIdConflictError as exc:
-        typer.secho(str(exc), fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
-    except (StateCorruptedError, IndexMissingError, ConfigMismatchError) as exc:
-        typer.secho(str(exc), fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
+            # 兼容旧版签名格式(纯 basename 字符串列表): 旧格式只能做 basename
+            # 级别比对(无法感知内容是否被替换), 新格式为 (basename, size, mtime)
+            # 三元组列表, 能进一步拦住"同名但内容已变"的误用场景(2026-10-03,
+            # 第二轮漏洞"签名只比 basename"修复, 与用户权衡性能后采用 大小+mtime
+            # 而非完整内容 MD5 的折中方案)。
+            is_legacy_format = bool(historical_signature) and isinstance(historical_signature[0], str)
+            if is_legacy_format:
+                current_signature = sorted(os.path.basename(f) for f in genome_files)
+                logger.warning(
+                    "历史 input_signature 为旧版格式(仅 basename), 本次校验退化为"
+                    "仅比对文件名, 无法感知文件内容是否被替换; 建议重新完整运行一次"
+                    "以升级签名格式。"
+                )
+            else:
+                current_signature = build_input_signature(genome_files)
+            if current_signature != historical_signature:
+                typer.secho(
+                    f"-i {input_dir} 下发现的基因组文件集合与历史记录不一致"
+                    "(--resume/-a 要求 -i 始终指向同一份历史基础数据集, 不允许变化): "
+                    f"历史={historical_signature}, 本次={current_signature}",
+                    fg=typer.colors.RED, err=True,
+                )
+                raise typer.Exit(code=1)
 
-    os.makedirs(output_dir, exist_ok=True)
+        if append_dir is not None:
+            missing_stages = [
+                name for name, has in (
+                    ("genomes", repository.has_genomes()),
+                    ("intra_results", repository.has_intra_results()),
+                    ("join_result", repository.has_join_result()),
+                    ("complete_ssn", repository.has_complete_ssn()),
+                    ("families", repository.has_families()),
+                ) if not has
+            ]
+            if missing_stages:
+                typer.secho(
+                    f"-a/--append 要求 -o {output_dir} 下是一次完整运行的结果, "
+                    f"但缺少以下 Stage 的历史产出: {', '.join(missing_stages)}; "
+                    "请先用 --resume 补全上次运行, 再执行 --append。",
+                    fg=typer.colors.RED, err=True,
+                )
+                raise typer.Exit(code=1)
 
-    summary = _build_load_summary(result.genomes)
-    summary_path = os.path.join(output_dir, "load_summary.json")
-    with open(summary_path, "w", encoding="utf-8") as fh:
-        json.dump(summary, fh, ensure_ascii=False, indent=2)
+        try:
+            clustering_for_mcl = _build_clustering(output_dir)
+        except RuntimeError as exc:
+            # 工程审查问题4(2026-10-03 与用户确认): 缺失外部二进制(如 mcl 未
+            # 安装)时, 构造函数会抛出 RuntimeError, 这里统一兜底为干净的报错
+            # 退出, 而不是让用户看到未捕获的 Python traceback。
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
 
-    typer.echo(
-        f"基因组加载完成: 共 {summary['total_genomes']} 个, "
-        f"成功 {summary['loaded_count']} 个, 失败 {summary['failed_count']} 个"
-    )
-    if summary["failed_count"]:
-        typer.secho(
-            f"失败的基因组: {', '.join(summary['failed_genome_ids'])}",
-            fg=typer.colors.YELLOW,
+        pipeline = Pipeline(
+            aligner=aligner,
+            clustering_for_intra=UnionFindClustering(),
+            clustering_for_mcl=clustering_for_mcl,
+            repository=repository,
+            config=PipelineConfig(
+                cutoff_i=cutoff_i,
+                cutoff_ii=cutoff_ii,
+                cutoff_c=cutoff_c,
+                cov_mode=cov_mode,
+                max_per_cluster=max_per_cluster,
+                edge_completion_mode=edge_completion_mode,
+                mega_cluster_warning_threshold=mega_cluster_warning_threshold,
+                inflation=inflation,
+                edge_weight_mode=edge_weight_mode,
+                edge_weight_alpha=edge_weight_alpha,
+                keep_intermediate=keep_intermediate,
+            ),
         )
-    typer.echo(f"摘要已写入: {summary_path}")
 
-    intra_summary = _build_intra_summary(result.intra_results)
-    intra_summary_path = os.path.join(output_dir, "intra_summary.json")
-    with open(intra_summary_path, "w", encoding="utf-8") as fh:
-        json.dump(intra_summary, fh, ensure_ascii=False, indent=2)
+        try:
+            if append_dir is not None:
+                new_genome_files = discover_fasta_files(append_dir)
+                if not new_genome_files:
+                    # 工程审查问题6(2026-10-03 与用户确认): -a/--append 指向
+                    # 空目录(或目录内无受支持的FASTA文件)时, 此前会"成功"退出
+                    # 但实际未追加任何内容, 容易让用户误以为追加生效; 改为报错。
+                    typer.secho(
+                        f"-a/--append 指向的目录下未发现任何 FASTA 文件"
+                        f"(*.fasta/*.fa/*.faa): {append_dir}",
+                        fg=typer.colors.RED, err=True,
+                    )
+                    raise typer.Exit(code=1)
+                logger.info(
+                    "追加模式(--append): 发现 %d 个新基因组候选文件(目录=%s)",
+                    len(new_genome_files), append_dir,
+                )
+                result = pipeline.append(new_genome_files, force=force)
+            elif resume:
+                logger.info("断点续跑(--resume): 共 %d 个候选文件", len(genome_files))
+                result = pipeline.resume(genome_files, force=force)
+            else:
+                logger.info("开始加载基因组, 共发现 %d 个候选文件", len(genome_files))
+                result = pipeline.run(genome_files)
+        except GenomeIdConflictError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        except (StateCorruptedError, IndexMissingError, ConfigMismatchError) as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
 
-    typer.echo(
-        f"基因组内自聚类完成: 共 {intra_summary['total_genes']} 个基因, "
-        f"压缩为 {intra_summary['total_representatives']} 个代表 "
-        f"(压缩率 {intra_summary['compression_ratio']:.2%})"
-    )
-    typer.echo(f"摘要已写入: {intra_summary_path}")
+        os.makedirs(output_dir, exist_ok=True)
 
-    join_summary = _build_join_summary(result.join_result)
-    join_summary_path = os.path.join(output_dir, "join_summary.json")
-    with open(join_summary_path, "w", encoding="utf-8") as fh:
-        json.dump(join_summary, fh, ensure_ascii=False, indent=2)
+        summary = _build_load_summary(result.genomes)
+        summary_path = os.path.join(output_dir, "load_summary.json")
+        with open(summary_path, "w", encoding="utf-8") as fh:
+            json.dump(summary, fh, ensure_ascii=False, indent=2)
 
-    typer.echo(
-        f"增量并入全局代表库完成: 最终 {join_summary['n_clusters_final']} 个簇, "
-        f"{join_summary['n_representatives_final']} 个全局代表, "
-        f"{join_summary['n_ssn_edges']} 条 SSN 边"
-    )
-    typer.echo(f"摘要已写入: {join_summary_path}")
+        typer.echo(
+            f"基因组加载完成: 共 {summary['total_genomes']} 个, "
+            f"成功 {summary['loaded_count']} 个, 失败 {summary['failed_count']} 个"
+        )
+        if summary["failed_count"]:
+            typer.secho(
+                f"失败的基因组: {', '.join(summary['failed_genome_ids'])}",
+                fg=typer.colors.YELLOW,
+            )
+        typer.echo(f"摘要已写入: {summary_path}")
 
-    ssn_summary = _build_ssn_summary(result.complete_ssn)
-    ssn_summary_path = os.path.join(output_dir, "ssn_summary.json")
-    with open(ssn_summary_path, "w", encoding="utf-8") as fh:
-        json.dump(ssn_summary, fh, ensure_ascii=False, indent=2)
+        intra_summary = _build_intra_summary(result.intra_results)
+        intra_summary_path = os.path.join(output_dir, "intra_summary.json")
+        with open(intra_summary_path, "w", encoding="utf-8") as fh:
+            json.dump(intra_summary, fh, ensure_ascii=False, indent=2)
 
-    typer.echo(
-        f"SSN 构建完成(edge_completion_mode={edge_completion_mode}): "
-        f"共 {ssn_summary['n_edges']} 条边"
-    )
-    typer.echo(f"摘要已写入: {ssn_summary_path}")
+        typer.echo(
+            f"基因组内自聚类完成: 共 {intra_summary['total_genes']} 个基因, "
+            f"压缩为 {intra_summary['total_representatives']} 个代表 "
+            f"(压缩率 {intra_summary['compression_ratio']:.2%})"
+        )
+        typer.echo(f"摘要已写入: {intra_summary_path}")
 
-    family_summary = _build_family_summary(result.families, inflation, edge_weight_mode)
-    family_summary_path = os.path.join(output_dir, "family_summary.json")
-    with open(family_summary_path, "w", encoding="utf-8") as fh:
-        json.dump(family_summary, fh, ensure_ascii=False, indent=2)
+        join_summary = _build_join_summary(result.join_result)
+        join_summary_path = os.path.join(output_dir, "join_summary.json")
+        with open(join_summary_path, "w", encoding="utf-8") as fh:
+            json.dump(join_summary, fh, ensure_ascii=False, indent=2)
 
-    orthogroups_path = os.path.join(output_dir, "Orthogroups.txt")
-    _write_orthogroups_txt(result.families, orthogroups_path)
+        typer.echo(
+            f"增量并入全局代表库完成: 最终 {join_summary['n_clusters_final']} 个簇, "
+            f"{join_summary['n_representatives_final']} 个全局代表, "
+            f"{join_summary['n_ssn_edges']} 条 SSN 边"
+        )
+        typer.echo(f"摘要已写入: {join_summary_path}")
 
-    typer.echo(f"MCL 亚家族细分完成: 共 {family_summary['n_families']} 个直系同源家族")
-    typer.echo(f"摘要已写入: {family_summary_path}")
-    typer.echo(f"Orthogroups 已写入: {orthogroups_path}")
+        ssn_summary = _build_ssn_summary(result.complete_ssn)
+        ssn_summary_path = os.path.join(output_dir, "ssn_summary.json")
+        with open(ssn_summary_path, "w", encoding="utf-8") as fh:
+            json.dump(ssn_summary, fh, ensure_ascii=False, indent=2)
+
+        typer.echo(
+            f"SSN 构建完成(edge_completion_mode={edge_completion_mode}): "
+            f"共 {ssn_summary['n_edges']} 条边"
+        )
+        typer.echo(f"摘要已写入: {ssn_summary_path}")
+
+        family_summary = _build_family_summary(result.families, inflation, edge_weight_mode)
+        family_summary_path = os.path.join(output_dir, "family_summary.json")
+        with open(family_summary_path, "w", encoding="utf-8") as fh:
+            json.dump(family_summary, fh, ensure_ascii=False, indent=2)
+
+        orthogroups_path = os.path.join(output_dir, "Orthogroups.txt")
+        _write_orthogroups_txt(result.families, orthogroups_path)
+
+        typer.echo(f"MCL 亚家族细分完成: 共 {family_summary['n_families']} 个直系同源家族")
+        typer.echo(f"摘要已写入: {family_summary_path}")
+        typer.echo(f"Orthogroups 已写入: {orthogroups_path}")
+    finally:
+        lock_cm.__exit__(None, None, None)
 
 
 if __name__ == "__main__":

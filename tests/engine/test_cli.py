@@ -383,6 +383,53 @@ def test_run_missing_clustering_binary_exits_cleanly_without_traceback(tmp_path,
     assert "未找到 mcl" in result.stdout or "未找到 mcl" in (result.stderr or "")
 
 
+def test_run_exits_with_error_when_output_dir_already_locked(tmp_path):
+    """工程审查问题7(2026-10-03 与用户确认): 若 `-o` 目录已被另一个正在
+    运行的 linc 进程持有独占锁, 本次 `run()` 应立即报错退出, 而不是并发
+    修改同一目录下的中间文件/state(不排队等待)。
+    """
+    import fcntl
+
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    work_dir = output_dir / ".linc_work"
+    work_dir.mkdir(parents=True)
+    lock_path = work_dir / "pipeline.lock"
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        result = runner.invoke(app, ["run", "-i", str(input_dir), "-o", str(output_dir)])
+        assert result.exit_code == 1
+        assert "pipeline.lock" in (result.stdout or "") + (result.stderr or "") or \
+            "已被另一个正在运行" in (result.stdout or "") + (result.stderr or "")
+        # 未产出任何 Stage 结果(未触及锁保护范围内的任何文件)。
+        assert not (output_dir / "load_summary.json").exists()
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def test_run_releases_lock_after_completion_allowing_subsequent_run(tmp_path):
+    """工程审查问题7(2026-10-03 与用户确认): 命令正常结束后应释放锁,
+    后续对同一 `-o` 目录的调用(如 --resume)应能正常获取锁并执行。
+    """
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    first = runner.invoke(app, ["run", "-i", str(input_dir), "-o", str(output_dir)])
+    assert first.exit_code == 0
+
+    second = runner.invoke(
+        app, ["run", "-i", str(input_dir), "-o", str(output_dir), "--resume"]
+    )
+    assert second.exit_code == 0
+
+
 def test_run_full_edge_completion_mode_end_to_end(tmp_path):
     input_dir = tmp_path / "genomes"
     input_dir.mkdir()
