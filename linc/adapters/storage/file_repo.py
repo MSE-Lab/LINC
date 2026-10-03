@@ -60,7 +60,11 @@ class FileRepository:
     # 号与实际数据一并写入每个 pickle 文件; `_load()` 读取时校验版本号,
     # 不匹配则抛出 `SchemaVersionMismatchError`, 而不是让程序在下游某个
     # 随机位置因缺字段抛出语义不清的 `AttributeError`。
-    SCHEMA_VERSION = 1
+    # 2026-10-03 递增至2(与用户确认): "方案B"改动中 Genome 新增
+    # source_file_name 字段、Gene 新增 original_header 字段, 且 genome_id
+    # 的语义从"文件名 stem"变为"内部短编号(G00001...)", 属于本注释所述
+    # "新增字段"与"改变语义"两种触发条件, 故递增版本号。
+    SCHEMA_VERSION = 2
 
     _FILES = {
         "genomes": "genomes.pkl",
