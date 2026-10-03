@@ -74,11 +74,16 @@ class SSNBuilderStage:
         cutoff_i: float = 0.5,
         cutoff_c: float = 0.5,
         cov_mode: int = COV_MODE_BIDIRECTIONAL,
+        cleanup_intermediate: bool = True,
     ) -> None:
         self._aligner = aligner
         self._edge_completion_mode = edge_completion_mode
         self._mega_cluster_warning_threshold = mega_cluster_warning_threshold
         self._event_bus = event_bus
+        # 数据管理优化第3项(2026-10-03 与用户确认): full 模式下 search()
+        # 落盘的中间文件(search_full_to_*/) 结果已转存进 CompleteSSN,
+        # 默认用完即删。
+        self._cleanup_intermediate = cleanup_intermediate
         # 与用户确认修复第二轮漏洞2(2026-10-03): 补边阶段复用/新发起比对产生
         # 的边, 必须与 IntraGenomeStage/GlobalJoinStage 一样统一走
         # passes_inclusion_cutoff() 判定, 保持 SSN 边纳入判据前后一致,
@@ -220,6 +225,15 @@ class SSNBuilderStage:
         已经做过全对全比对(结果都在 `pairwise_hits` 里), 这里只需按
         `gene_id -> local_cluster_id` 映射识别出"跨局部簇"的基因对,
         直接查表补边, 不发起任何新比对, 不引入额外子进程调用。
+
+        bitscore 方向约定(第二轮漏洞7, 2026-10-03 与用户确认, 文档澄清、
+        不改动逻辑): 下方"第二遍"对跨基因组基因对发起新比对时, 只按
+        genome_id 字典序固定一个方向(genome_a < genome_b 时以 genome_a
+        的基因作 query、genome_b 的基因作 subject), 不会反向再比对一次。
+        因此产生的 SSNEdge.source/target(及其 bitscore/source_length/
+        target_length)的 query/subject 身份由"谁的 genome_id 字典序更小"
+        决定, 是人为约定而非语义上的"真实"方向; 详见 `SSNEdge` 类 docstring
+        中的说明。
         """
         global_lib = incremental_result.global_lib
         gene_cluster_map: Dict[str, str] = {}
@@ -343,6 +357,8 @@ class SSNBuilderStage:
                 hits = self._aligner.search(
                     query_genes, index_b, tag=f"full_to_{genome_b}"
                 )
+                if self._cleanup_intermediate:
+                    self._aligner.cleanup_search(index_b, tag=f"full_to_{genome_b}")
             else:
                 # 回退: 没有持久化索引可复用(如测试/某些 adapter 实现),
                 # 退化为一次性的便捷方法调用, 仍然按 target 基因组聚合,

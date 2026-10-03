@@ -8,7 +8,7 @@
 注意: 阈值过滤(Cutoff-I 判定)不是本 adapter 的职责, 应在构造 graph 时
 (或调用方 Stage 中)已经完成, 本 adapter 只做"连通性"计算。
 """
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 import networkx as nx
 
@@ -60,3 +60,9 @@ class UnionFindClustering:
         for u, v in graph.edges:
             dsu.union(u, v)
         return dsu.groups()
+
+    def cleanup(self, index_id: Optional[str] = None) -> None:
+        """UnionFind 实现不落盘任何中间文件, 本方法为满足 ClusteringPort
+        接口而提供, 无需做任何事(2026-10-03 与用户确认)。
+        """
+        return None

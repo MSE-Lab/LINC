@@ -55,6 +55,7 @@ class GlobalJoinStage:
         cov_mode: int = COV_MODE_BIDIRECTIONAL,
         max_per_cluster: int = 5,
         event_bus: Optional[EventBus] = None,
+        cleanup_intermediate: bool = True,
     ) -> None:
         self._aligner = aligner
         self._cutoff_i = cutoff_i
@@ -64,6 +65,9 @@ class GlobalJoinStage:
         self._max_per_cluster = max_per_cluster
         self._event_bus = event_bus
         self._cluster_counter = 0
+        # 数据管理优化第3项(2026-10-03 与用户确认): search() 落盘的中间文件
+        # (search_join/) 结果已转存进 IncrementalResult, 默认用完即删。
+        self._cleanup_intermediate = cleanup_intermediate
 
     def run(
         self,
@@ -159,6 +163,8 @@ class GlobalJoinStage:
         query_genes = global_lib.representative_genes()
         if query_genes and intra.genome_index is not None:
             hits = self._aligner.search(query_genes, intra.genome_index, tag="join")
+            if self._cleanup_intermediate:
+                self._aligner.cleanup_search(intra.genome_index, tag="join")
         else:
             hits = []
 

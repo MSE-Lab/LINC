@@ -101,6 +101,34 @@ def test_cluster_overwrites_previous_results_for_same_index_id(tmp_path, monkeyp
     assert not os.path.exists(stale_path)
 
 
+def test_cleanup_removes_index_id_work_dir(tmp_path, monkeypatch):
+    """数据管理优化第3项(2026-10-03 与用户确认): `cleanup(index_id=...)`
+    应删除该 index_id 对应的 `work_dir/index_id/` 中间文件子目录。
+    """
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mcl")
+    work_dir = str(tmp_path / "mcl_work")
+    clustering = MCLClustering(MCLConfig(work_dir=work_dir))
+    monkeypatch.setattr(subprocess, "run", _fake_run_factory(["A\tB"]))
+
+    graph = nx.Graph()
+    graph.add_edge("A", "B", weight=1.0)
+    clustering.cluster(graph, inflation=1.5, index_id="component_1")
+
+    component_dir = os.path.join(work_dir, "component_1")
+    assert os.path.exists(component_dir)
+
+    clustering.cleanup(index_id="component_1")
+
+    assert not os.path.exists(component_dir)
+
+
+def test_cleanup_with_none_index_id_is_noop(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mcl")
+    clustering = MCLClustering()
+    # 不应抛出异常。
+    clustering.cleanup(index_id=None)
+
+
 def test_empty_edge_graph_returns_singleton_clusters_without_calling_subprocess(monkeypatch):
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mcl")
 

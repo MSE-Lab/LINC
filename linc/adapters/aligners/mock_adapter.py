@@ -98,3 +98,9 @@ class MockAligner:
         任何中间文件, 因此直接忽略(2026-10-02 与用户确认)。
         """
         return [self._lookup_or_compute(q, s) for q in query for s in index]
+
+    def cleanup_search(self, index: Any, tag: Optional[str] = None) -> None:
+        """Mock 场景 `search()` 不落盘任何中间文件, 本方法为满足 AlignerPort
+        接口而提供, 无需做任何事(2026-10-03 与用户确认)。
+        """
+        return None

@@ -281,6 +281,14 @@ def run(
         help="仅 --edge-weight-mode identity_coverage_weighted 生效: "
              "identity 的权重系数, coverage 权重为 (1-alpha), 范围 [0, 1]。",
     ),
+    keep_intermediate: bool = typer.Option(
+        False, "--keep-intermediate",
+        help="默认(False)下各 Stage 用完 search()/mcl 产生的中间文件即删"
+             "(如 search_join/search_full_to_*/component_*), 避免 "
+             ".linc_work 无限累积(数据管理优化第3项, 2026-10-03); "
+             "索引目录/state pkl 不受影响, 始终保留。设为 True 保留全部中间"
+             "产物以便调试。",
+    ),
     verbose: bool = typer.Option(False, "--verbose", help="输出 DEBUG 级别日志。"),
 ) -> None:
     """运行 LINC 流水线(当前阶段已接通 GenomeLoadStage + IntraGenomeStage +
@@ -445,6 +453,7 @@ def run(
             inflation=inflation,
             edge_weight_mode=edge_weight_mode,
             edge_weight_alpha=edge_weight_alpha,
+            keep_intermediate=keep_intermediate,
         ),
     )
 

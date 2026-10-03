@@ -393,3 +393,41 @@ def test_search_empty_query_or_index_returns_empty_without_calling_subprocess(mo
     aligner = DiamondAligner(DiamondConfig(work_dir=_tmp_work_dir(tmp_path)))
     assert aligner.search([], "/fake/db") == []
     assert aligner.search([_gene("q1", 10)], None) == []
+
+
+def test_cleanup_search_removes_tagged_subdir_but_not_index(monkeypatch, tmp_path):
+    """数据管理优化第3项(2026-10-03 与用户确认): `cleanup_search(index, tag)`
+    应删除 `<index_dir>/search_<tag>/` 中间文件子目录, 不影响索引本身。
+    """
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/diamond")
+
+    def _fake_run(cmd, check, capture_output, text):
+        result_tsv = cmd[cmd.index("-o") + 1]
+        with open(result_tsv, "w", encoding="utf-8") as fh:
+            fh.write("q1\ts1\t80.0\t0.8\t0.8\t1e-10\t100.0\t50\t10\t10")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    aligner = DiamondAligner(DiamondConfig(work_dir=_tmp_work_dir(tmp_path)))
+    persisted_index = os.path.join(str(tmp_path), "persisted", "db")
+    with open(f"{persisted_index}.dmnd", "w", encoding="utf-8") as fh:
+        fh.write("fake db")
+
+    aligner.search([_gene("q1", 10)], persisted_index, tag="join")
+    search_dir = os.path.join(str(tmp_path), "persisted", "search_join")
+    assert os.path.exists(search_dir)
+
+    aligner.cleanup_search(persisted_index, tag="join")
+
+    assert not os.path.exists(search_dir)
+    # 索引本身不受影响。
+    assert os.path.exists(f"{persisted_index}.dmnd")
+
+
+def test_cleanup_search_with_falsy_index_is_noop(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/diamond")
+    aligner = DiamondAligner()
+    # 不应抛出任何异常。
+    aligner.cleanup_search(None, tag="join")
+    aligner.cleanup_search("", tag="join")

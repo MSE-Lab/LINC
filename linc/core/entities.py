@@ -148,6 +148,18 @@ class SSNEdge:
     # 转存而来, 为未来 MCL 权重归一化(如 OrthoFinder 式长度校正)预留,
     # 默认 0 表示未知(2026-10-02 与用户确认)。source/target 对应 query/subject
     # 的先后关系由构造方保证一致, 不在本类内部做强制校验。
+    #
+    # bitscore 方向约定说明(第二轮漏洞7, 2026-10-03 与用户确认, 文档澄清、
+    # 不改动逻辑): bitscore 是有方向性的量(query→subject 与 subject→query
+    # 的比对结果数值可能不同)。SSNBuilderStage 的 full 模式在
+    # _complete_cross_genome_member_edges() 中跨基因组补边时, 只按
+    # genome_id 字典序固定一个方向发起比对(genome_a < genome_b 时以
+    # genome_a 的基因作 query、genome_b 的基因作 subject), 不会反向再比对
+    # 一次。因此 source/target 对应的 query/subject 身份(以及由此而来的
+    # bitscore、source_length/target_length)由"谁的 genome_id 字典序更小"
+    # 决定, 是一个人为约定而非语义上的"真实"query/subject 关系。使用
+    # --edge-weight-mode bitscore 时, 边权重会按此约定确定性产生(同一输入
+    # 多次运行结果一致), 但数值本身受"谁排前"影响, 不代表双向比对的对称值。
     source_length: int = 0
     target_length: int = 0
 

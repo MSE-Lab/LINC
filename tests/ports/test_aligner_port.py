@@ -55,6 +55,9 @@ class FakeAligner:
     def index_exists(self, index) -> bool:
         return bool(index)
 
+    def cleanup_search(self, index, tag=None) -> None:
+        return None
+
 
 def _make_genes() -> List[Gene]:
     return [

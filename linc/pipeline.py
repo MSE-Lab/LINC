@@ -66,6 +66,10 @@ class PipelineConfig:
     inflation: float = 1.5
     edge_weight_mode: str = "identity_x_coverage"
     edge_weight_alpha: float = 0.5
+    # 数据管理优化第3项(2026-10-03 与用户确认): 默认 False 即各 Stage 用完
+    # search()/mcl 产生的中间文件即删, 避免 `.linc_work` 无限累积; 设为
+    # True 保留全部中间产物以便调试(索引目录/state pkl 不受影响, 始终保留)。
+    keep_intermediate: bool = False
 
 
 @dataclass
@@ -140,6 +144,7 @@ class Pipeline:
             cutoff_c=config.cutoff_c,
             cov_mode=config.cov_mode,
             max_per_cluster=config.max_per_cluster,
+            cleanup_intermediate=not config.keep_intermediate,
         )
         return {
             genome_id: intra_stage.run(genome)
@@ -162,6 +167,7 @@ class Pipeline:
             cutoff_c=config.cutoff_c,
             cov_mode=config.cov_mode,
             max_per_cluster=config.max_per_cluster,
+            cleanup_intermediate=not config.keep_intermediate,
         )
         return join_stage.run(
             loaded_genomes,
@@ -185,6 +191,7 @@ class Pipeline:
             cutoff_i=config.cutoff_i,
             cutoff_c=config.cutoff_c,
             cov_mode=config.cov_mode,
+            cleanup_intermediate=not config.keep_intermediate,
         )
         return ssn_stage.run(loaded_genomes, intra_results, join_result)
 
@@ -199,6 +206,7 @@ class Pipeline:
             inflation=config.inflation,
             edge_weight_mode=config.edge_weight_mode,
             edge_weight_alpha=config.edge_weight_alpha,
+            cleanup_intermediate=not config.keep_intermediate,
         )
         # 传入全部基因id, 以便零边的孤立基因也能被显式补成图节点, 避免在
         # nx.connected_components() 中被静默忽略而从最终家族结果中消失

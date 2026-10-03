@@ -234,3 +234,54 @@ def test_pairwise_hits_includes_all_non_self_comparisons_for_ssn_builder_reuse()
         frozenset((g1.gene_id, g3.gene_id)),
         frozenset((g2.gene_id, g3.gene_id)),
     }
+
+
+def test_cleans_up_search_intermediate_by_default(monkeypatch):
+    """数据管理优化第3项(2026-10-03): search() 的中间文件(search_intra_self/)
+    结果已转存进 pairwise_hits, 默认(cleanup_intermediate=True)应在消费完
+    结果后立即调用 `cleanup_search` 清理, index/tag 需与 search() 一致。
+    """
+    g1, g2 = _make_gene("g1", 1), _make_gene("g1", 2)
+    aligner = MockAligner()
+    aligner.set_result(g1.gene_id, g2.gene_id, _result(g1, g2, 0.9))
+    genome = Genome(genome_id="g1", file_path="g1.faa", genes=[g1, g2])
+
+    cleanup_calls = []
+    original_cleanup = aligner.cleanup_search
+
+    def _recording_cleanup(index, tag=None):
+        cleanup_calls.append((index, tag))
+        return original_cleanup(index, tag=tag)
+
+    monkeypatch.setattr(aligner, "cleanup_search", _recording_cleanup)
+
+    stage = IntraGenomeStage(aligner=aligner, clustering=UnionFindClustering())
+    result = stage.run(genome)
+
+    assert cleanup_calls == [(result.genome_index, "intra_self")]
+
+
+def test_keep_intermediate_skips_cleanup(monkeypatch):
+    """`cleanup_intermediate=False` 时不应调用 `cleanup_search`(保留中间
+    文件以便调试, 2026-10-03 与用户确认)。
+    """
+    g1, g2 = _make_gene("g1", 1), _make_gene("g1", 2)
+    aligner = MockAligner()
+    aligner.set_result(g1.gene_id, g2.gene_id, _result(g1, g2, 0.9))
+    genome = Genome(genome_id="g1", file_path="g1.faa", genes=[g1, g2])
+
+    cleanup_calls = {"n": 0}
+    original_cleanup = aligner.cleanup_search
+
+    def _counting_cleanup(index, tag=None):
+        cleanup_calls["n"] += 1
+        return original_cleanup(index, tag=tag)
+
+    monkeypatch.setattr(aligner, "cleanup_search", _counting_cleanup)
+
+    stage = IntraGenomeStage(
+        aligner=aligner, clustering=UnionFindClustering(), cleanup_intermediate=False
+    )
+    stage.run(genome)
+
+    assert cleanup_calls["n"] == 0

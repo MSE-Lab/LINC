@@ -68,6 +68,7 @@ class IntraGenomeStage:
         cov_mode: int = COV_MODE_BIDIRECTIONAL,
         max_per_cluster: int = 5,
         event_bus: Optional[EventBus] = None,
+        cleanup_intermediate: bool = True,
     ) -> None:
         self._aligner = aligner
         self._clustering = clustering
@@ -77,6 +78,10 @@ class IntraGenomeStage:
         self._cov_mode = cov_mode
         self._max_per_cluster = max_per_cluster
         self._event_bus = event_bus
+        # 数据管理优化第3项(2026-10-03 与用户确认): search() 落盘的中间文件
+        # (search_intra_self/) 结果已转存进 pairwise_hits, 默认用完即删,
+        # 避免 .linc_work 无限累积; 设为 False 可保留以便调试。
+        self._cleanup_intermediate = cleanup_intermediate
 
     def run(self, genome: Genome) -> GenomeIntraResult:
         genes = genome.genes
@@ -93,6 +98,8 @@ class IntraGenomeStage:
         # genome_index 对应的同一份 genes, 让 aligner 直接复用已持久化的
         # genes.fasta/索引, 不再重复写一份内容完全相同的 query.fasta。
         hits = self._aligner.search(genes, genome_index, tag="intra_self", self_search=True)
+        if self._cleanup_intermediate:
+            self._aligner.cleanup_search(genome_index, tag="intra_self")
 
         identity_map: _IdentityMap = {}
         coverage_map: _IdentityMap = {}

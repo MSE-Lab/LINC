@@ -54,3 +54,11 @@ def test_chain_merges_into_one_component_regardless_of_edge_order():
     graph.add_edges_from([("d", "c"), ("a", "b"), ("b", "c")])
     result = UnionFindClustering().cluster(graph)
     assert result == [{"a", "b", "c", "d"}]
+
+
+def test_cleanup_is_noop_since_no_intermediate_files_are_written():
+    """UnionFindClustering 不落盘任何中间文件, `cleanup()` 应为空操作
+    (数据管理优化第3项, 2026-10-03 与用户确认)。"""
+    # 不应抛出任何异常。
+    UnionFindClustering().cleanup(index_id="anything")
+    UnionFindClustering().cleanup()

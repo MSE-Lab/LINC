@@ -275,3 +275,16 @@ class DiamondAligner:
             ) from exc
 
         return self._parse_result_tsv(result_tsv)
+
+    def cleanup_search(self, index: Any, tag: Optional[str] = None) -> None:
+        """删除 `search(index, tag=...)` 落盘的 `<index_dir>/search_<tag>/`
+        中间文件子目录(数据管理优化第3项, 2026-10-03 与用户确认), 索引
+        本身(`<index_dir>/db.dmnd` 等 build_index 产物)不受影响。
+        """
+        if not index:
+            return
+        index_dir = os.path.dirname(str(index))
+        if not index_dir:
+            return
+        subdir_name = f"search_{tag}" if tag else "search"
+        shutil.rmtree(os.path.join(index_dir, subdir_name), ignore_errors=True)

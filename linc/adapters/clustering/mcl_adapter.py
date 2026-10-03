@@ -93,6 +93,16 @@ class MCLClustering:
 
         return self._parse_output(output_path)
 
+    def cleanup(self, index_id: Optional[str] = None) -> None:
+        """删除 `cluster(index_id=...)` 落盘的 `work_dir/index_id/` 中间文件
+        子目录(.abc 输入/mcl 原生输出), 数据管理优化第3项(2026-10-03 与
+        用户确认): 结果已被 `cluster()` 调用方解析并转存进
+        `OrthologFamily` 列表, 中间文件不再被后续步骤读取。
+        """
+        if not index_id:
+            return
+        shutil.rmtree(os.path.join(self._config.work_dir, index_id), ignore_errors=True)
+
     @staticmethod
     def _write_abc(graph: nx.Graph, path: str) -> None:
         # 按 (u, v) 字典序排序后再写入, 消除 networkx 图边遍历顺序(取决于

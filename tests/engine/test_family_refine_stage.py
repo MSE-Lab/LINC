@@ -24,6 +24,9 @@ class _OneClusterPerComponent:
     def cluster(self, graph: nx.Graph, **params) -> List[Set[str]]:
         return [set(graph.nodes)]
 
+    def cleanup(self, index_id=None) -> None:
+        return None
+
 
 class _SplitEveryEdgeIntoOwnCluster:
     """假 ClusteringPort: 把每条边拆成独立的簇(用于验证一个连通分量可以
@@ -31,6 +34,9 @@ class _SplitEveryEdgeIntoOwnCluster:
 
     def cluster(self, graph: nx.Graph, **params) -> List[Set[str]]:
         return [set(edge) for edge in graph.edges]
+
+    def cleanup(self, index_id=None) -> None:
+        return None
 
 
 def _edge(a: str, b: str, identity: float = 0.9, coverage: float = 0.9, bitscore: float = 100.0) -> SSNEdge:

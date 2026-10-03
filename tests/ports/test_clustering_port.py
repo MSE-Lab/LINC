@@ -10,6 +10,9 @@ class FakeConnectedComponentsClustering:
     def cluster(self, graph: nx.Graph, **params) -> list[set[str]]:
         return [set(component) for component in nx.connected_components(graph)]
 
+    def cleanup(self, index_id=None) -> None:
+        return None
+
 
 def test_fake_clustering_satisfies_protocol_via_isinstance():
     assert isinstance(FakeConnectedComponentsClustering(), ClusteringPort)

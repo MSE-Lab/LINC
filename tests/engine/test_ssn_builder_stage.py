@@ -342,6 +342,55 @@ def test_full_mode_uses_persisted_genome_index_not_align_query_vs_subject(monkey
     assert frozenset(("A|3", "B|3")) in actual_pairs
 
 
+def test_full_mode_cleans_up_search_intermediate_by_default(monkeypatch):
+    """数据管理优化第3项(2026-10-03): full 模式下 search() 的中间文件
+    结果已转存进 CompleteSSN, 默认(cleanup_intermediate=True)应在消费完
+    结果后立即调用 `cleanup_search` 清理, tag/index 需与 search() 一致。
+    """
+    genomes, intra_results, incremental_result = _build_two_genome_fixture()
+    intra_results["B"].genome_index = list(genomes["B"].genes)
+
+    aligner = MockAligner()
+    cleanup_calls = []
+    original_cleanup = aligner.cleanup_search
+
+    def _recording_cleanup(index, tag=None):
+        cleanup_calls.append((index, tag))
+        return original_cleanup(index, tag=tag)
+
+    monkeypatch.setattr(aligner, "cleanup_search", _recording_cleanup)
+
+    stage = SSNBuilderStage(aligner=aligner, edge_completion_mode="full")
+    stage.run(genomes, intra_results, incremental_result)
+
+    assert cleanup_calls == [(intra_results["B"].genome_index, "full_to_B")]
+
+
+def test_full_mode_keep_intermediate_skips_cleanup(monkeypatch):
+    """`cleanup_intermediate=False` 时不应调用 `cleanup_search`(保留中间
+    文件以便调试, 2026-10-03 与用户确认)。
+    """
+    genomes, intra_results, incremental_result = _build_two_genome_fixture()
+    intra_results["B"].genome_index = list(genomes["B"].genes)
+
+    aligner = MockAligner()
+    cleanup_calls = {"n": 0}
+    original_cleanup = aligner.cleanup_search
+
+    def _counting_cleanup(index, tag=None):
+        cleanup_calls["n"] += 1
+        return original_cleanup(index, tag=tag)
+
+    monkeypatch.setattr(aligner, "cleanup_search", _counting_cleanup)
+
+    stage = SSNBuilderStage(
+        aligner=aligner, edge_completion_mode="full", cleanup_intermediate=False
+    )
+    stage.run(genomes, intra_results, incremental_result)
+
+    assert cleanup_calls["n"] == 0
+
+
 def test_full_mode_cross_genome_calls_independent_of_cluster_count(monkeypatch):
     """多个全局簇共享同一对基因组时, 跨基因组比对调用次数应只取决于
     "基因组对数量", 与簇数量无关(性能修复验证, 2026-10-02)。

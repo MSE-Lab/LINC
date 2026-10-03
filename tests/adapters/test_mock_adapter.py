@@ -105,3 +105,13 @@ def test_search_result_matches_align_query_vs_subject():
     via_search = aligner.search(query, index)
     via_direct = aligner.align_query_vs_subject(query, subject)
     assert via_search[0].identity == via_direct[0].identity
+
+
+def test_cleanup_search_is_noop_since_no_intermediate_files_are_written():
+    """Mock 场景不落盘任何中间文件, `cleanup_search()` 应为空操作
+    (数据管理优化第3项, 2026-10-03 与用户确认)。"""
+    aligner = MockAligner()
+    index = aligner.build_index([_gene("s1", 10)])
+    # 不应抛出任何异常。
+    aligner.cleanup_search(index, tag="join")
+    aligner.cleanup_search(None)

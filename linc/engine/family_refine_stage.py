@@ -48,11 +48,15 @@ class FamilyRefineStage:
         inflation: float = 1.5,
         edge_weight_mode: str = "identity_x_coverage",
         edge_weight_alpha: float = 0.5,
+        cleanup_intermediate: bool = True,
     ) -> None:
         self._clustering = clustering
         self._inflation = inflation
         self._edge_weight_mode = edge_weight_mode
         self._edge_weight_alpha = edge_weight_alpha
+        # 数据管理优化第3项(2026-10-03 与用户确认): mcl 落盘的中间文件
+        # (component_*/) 结果已转存进 OrthologFamily, 默认用完即删。
+        self._cleanup_intermediate = cleanup_intermediate
 
     def run(
         self,
@@ -77,11 +81,14 @@ class FamilyRefineStage:
                 continue
 
             subgraph = graph.subgraph(component_nodes)
+            index_id = f"component_{component_id}"
             sub_clusters = self._clustering.cluster(
                 subgraph,
                 inflation=self._inflation,
-                index_id=f"component_{component_id}",
+                index_id=index_id,
             )
+            if self._cleanup_intermediate:
+                self._clustering.cleanup(index_id=index_id)
             for member_ids in sub_clusters:
                 family_specs.append((component_id, set(member_ids)))
 

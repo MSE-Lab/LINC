@@ -77,6 +77,19 @@ class AlignerPort(Protocol):
         """
         ...
 
+    def cleanup_search(self, index: Any, tag: Optional[str] = None) -> None:
+        """删除 `search(index, tag=...)` 产生的中间文件子目录(数据管理优化
+        第3项, 2026-10-03 与用户确认):`search()` 的中间文件(query.fasta/
+        result.tsv 等)落盘到 `<index_dir>/search_<tag>/` 后, 其结果已被
+        调用方解析并转存进内存/state对象(`pairwise_hits`/`IncrementalResult`/
+        `CompleteSSN`), 中间文件本身不再被任何后续步骤读取, 调用方应在
+        消费完 `search()` 的返回值后立即调用本方法清理, 避免 `.linc_work`
+        无限累积。`index`/`tag` 需与对应的 `search()` 调用完全一致, 以便
+        实现定位到同一个中间目录。索引本身(`build_index` 产物)不受影响,
+        不会被本方法删除。
+        """
+        ...
+
     def align_all_vs_all(self, genes: Sequence[Gene]) -> List[AlignmentResult]:
         """基因组内全对全比对 (Step2 用途)。"""
         ...

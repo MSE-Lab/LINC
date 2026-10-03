@@ -89,6 +89,62 @@ def test_initial_global_lib_is_extended_not_replaced():
     assert result.n_clusters_final == 2
 
 
+def test_cleans_up_search_intermediate_by_default(monkeypatch):
+    """数据管理优化第3项(2026-10-03): search() 的中间文件(search_join/)
+    结果已转存进 IncrementalResult, 默认(cleanup_intermediate=True)应在
+    消费完结果后立即调用 `cleanup_search` 清理, index/tag 需与 search()
+    一致。第一个基因组处理时全局库为空、不会发起 search, 第二个基因组
+    才会真正调用 search(复用 global_lib 中第一个基因组的代表作为 query)。
+    """
+    a = _gene("g1", 1, length=100)
+    b = _gene("g2", 1, length=10)
+    genome_a, intra_a = _make_genome_and_intra("g1", [a], [a.gene_id])
+    genome_b, intra_b = _make_genome_and_intra("g2", [b], [b.gene_id])
+
+    aligner = MockAligner()
+    cleanup_calls = []
+    original_cleanup = aligner.cleanup_search
+
+    def _recording_cleanup(index, tag=None):
+        cleanup_calls.append((index, tag))
+        return original_cleanup(index, tag=tag)
+
+    monkeypatch.setattr(aligner, "cleanup_search", _recording_cleanup)
+
+    _stage(aligner, cutoff_i=0.5).run(
+        {"g1": genome_a, "g2": genome_b}, {"g1": intra_a, "g2": intra_b},
+    )
+
+    assert cleanup_calls == [(intra_b.genome_index, "join")]
+
+
+def test_keep_intermediate_skips_cleanup(monkeypatch):
+    """`cleanup_intermediate=False` 时不应调用 `cleanup_search`(保留中间
+    文件以便调试, 2026-10-03 与用户确认)。
+    """
+    a = _gene("g1", 1, length=100)
+    b = _gene("g2", 1, length=10)
+    genome_a, intra_a = _make_genome_and_intra("g1", [a], [a.gene_id])
+    genome_b, intra_b = _make_genome_and_intra("g2", [b], [b.gene_id])
+
+    aligner = MockAligner()
+    cleanup_calls = {"n": 0}
+    original_cleanup = aligner.cleanup_search
+
+    def _counting_cleanup(index, tag=None):
+        cleanup_calls["n"] += 1
+        return original_cleanup(index, tag=tag)
+
+    monkeypatch.setattr(aligner, "cleanup_search", _counting_cleanup)
+
+    stage = GlobalJoinStage(
+        aligner=aligner, cutoff_i=0.5, cleanup_intermediate=False
+    )
+    stage.run({"g1": genome_a, "g2": genome_b}, {"g1": intra_a, "g2": intra_b})
+
+    assert cleanup_calls["n"] == 0
+
+
 def test_single_genome_single_representative_creates_one_cluster():
     g1 = _gene("g1", 1)
     genome, intra = _make_genome_and_intra("g1", [g1], [g1.gene_id])
