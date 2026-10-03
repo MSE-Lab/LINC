@@ -47,7 +47,7 @@ from .adapters.storage.file_repo import FileRepository, StateCorruptedError
 from .pipeline import ConfigMismatchError, IndexMissingError, Pipeline, PipelineConfig
 from .utils.lock import PipelineLockedError, acquire_pipeline_lock
 
-app = typer.Typer(help="LINC: incremental genome comparison that builds a sequence similarity network (SSN) and refines protein families via MCL.")
+app = typer.Typer(help="LINC: Linear incremental genome comparison that builds a sequence similarity network (SSN) and refines protein families via MCL.")
 
 
 @app.callback()
@@ -205,6 +205,18 @@ def _write_orthogroups_txt(families, gene_id_to_original: dict, path: str) -> No
             fh.write(f"{family.family_id}\t{' '.join(members)}\n")
 
 
+def _write_gene_genome_tsv(genomes: dict, path: str) -> None:
+    """输出 gene_genome.tsv: 每行为"原始序列ID\t基因组名"(基因组名取
+    Genome.source_file_name), 便于用户把任意序列对照回其所属的原始
+    基因组文件, 不依赖内部 gene_id/genome_id 编码。
+    """
+    with open(path, "w", encoding="utf-8") as fh:
+        for genome in genomes.values():
+            for gene in genome.genes:
+                header = gene.original_header or gene.gene_id
+                fh.write(f"{header}\t{genome.source_file_name}\n")
+
+
 def _build_intra_summary(intra_results: dict) -> dict:
     total_genes = sum(r.n_genes for r in intra_results.values())
     total_representatives = sum(r.n_representatives for r in intra_results.values())
@@ -320,8 +332,7 @@ def run(
     ),
     verbose: bool = typer.Option(False, "--verbose", help="Enable DEBUG-level logging."),
 ) -> None:
-    """Run the LINC pipeline (GenomeLoadStage -> IntraGenomeStage -> GlobalJoinStage ->
-    SSNBuilderStage -> FamilyRefineStage)."""
+    """Run the LINC pipeline (GenomeLoadStage -> IntraGenomeStage -> GlobalJoinStage -> SSNBuilderStage -> FamilyRefineStage)."""
     _setup_logging(verbose)
 
     if not os.path.isdir(input_dir):
@@ -629,9 +640,13 @@ def run(
         gene_id_to_original = _build_gene_id_to_original(result.genomes)
         _write_orthogroups_txt(result.families, gene_id_to_original, orthogroups_path)
 
+        gene_genome_path = os.path.join(output_dir, "gene_genome.tsv")
+        _write_gene_genome_tsv(result.genomes, gene_genome_path)
+
         typer.echo(f"MCL 亚家族细分完成: 共 {family_summary['n_families']} 个直系同源家族")
         typer.echo(f"摘要已写入: {family_summary_path}")
         typer.echo(f"Orthogroups 已写入: {orthogroups_path}")
+        typer.echo(f"基因-基因组对照表已写入: {gene_genome_path}")
     finally:
         lock_cm.__exit__(None, None, None)
 
