@@ -179,6 +179,52 @@ def test_custom_config_values_are_used_in_command(monkeypatch):
     assert "4" in cmd
 
 
+def test_easy_search_passes_max_seqs_to_avoid_default_truncation(monkeypatch):
+    # 第二轮漏洞4: mmseqs 默认 --max-seqs=300 会静默截断大旁系家族的命中数,
+    # 必须显式传递。
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
+    captured_cmd = {}
+
+    def _fake_run(cmd, check, capture_output, text):
+        captured_cmd["cmd"] = cmd
+        result_tsv = cmd[4]
+        with open(result_tsv, "w", encoding="utf-8") as fh:
+            fh.write("")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    aligner = MMseqsAligner(MMseqsConfig(max_seqs=50000))
+    aligner.align_all_vs_all([_gene("g1|1", 100), _gene("g1|2", 100)])
+
+    cmd = captured_cmd["cmd"]
+    assert "--max-seqs" in cmd
+    assert "50000" in cmd
+
+
+def test_easy_search_default_max_seqs_is_not_mmseqs_default_300(monkeypatch):
+    # 默认配置下也应显式传入一个远大于 mmseqs 自带默认值(300)的 --max-seqs,
+    # 贴合"必须全量比对"的设计访对要求。
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
+    captured_cmd = {}
+
+    def _fake_run(cmd, check, capture_output, text):
+        captured_cmd["cmd"] = cmd
+        result_tsv = cmd[4]
+        with open(result_tsv, "w", encoding="utf-8") as fh:
+            fh.write("")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    aligner = MMseqsAligner()
+    aligner.align_all_vs_all([_gene("g1|1", 100), _gene("g1|2", 100)])
+
+    cmd = captured_cmd["cmd"]
+    max_seqs_idx = cmd.index("--max-seqs")
+    assert int(cmd[max_seqs_idx + 1]) > 300
+
+
 def test_default_threads_zero_omits_threads_flag(monkeypatch):
     """threads<=0(默认)时不应传递 --threads, 避免 mmseqs 报 "Error in argument --threads"。"""
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
@@ -253,6 +299,10 @@ def test_search_runs_createdb_search_convertalis_against_persisted_index(monkeyp
     # search/convertalis 都应直接使用传入的持久化 index 路径作为 target, 不重新 createdb
     assert calls[1][3] == persisted_index
     assert calls[2][3] == persisted_index
+    # 第二轮漏洞4: search 子命令也应显式传递 --max-seqs, 避免默认值(300)截断。
+    search_cmd = calls[1]
+    assert "--max-seqs" in search_cmd
+    assert int(search_cmd[search_cmd.index("--max-seqs") + 1]) > 300
     # 比对中间文件(query.fasta/result.tsv)应持久化保存在 index 所在目录的
     # search/ 子目录下, 不使用临时目录(2026-10-01, 与用户确认)。
     assert os.path.exists(os.path.join(str(tmp_path), "persisted", "search", "query.fasta"))

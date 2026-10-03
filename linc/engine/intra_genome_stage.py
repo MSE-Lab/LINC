@@ -241,9 +241,17 @@ class IntraGenomeStage:
                     for rep in representatives
                 )
 
-            candidate = min(remaining, key=max_sim_to_reps)
-            if is_covered(candidate):
+            # 修复(2026-10-03): 不能先按 identity 贪心选出候选再单独检查该
+            # 候选是否被覆盖——当多个剩余成员的 identity 并列最低时,先选中
+            # 的候选可能恰好"被覆盖"(双条件达标)而被提前 break,导致其他
+            # identity 并列但 coverage 不达标、真正"未被覆盖"的成员被遗漏。
+            # 应先筛出所有"未被覆盖"的剩余成员,只要存在未覆盖成员就必须
+            # 继续选代表(按 identity 贪心挑其中相似度最低者),全部被覆盖
+            # 才停止。
+            uncovered = [m for m in remaining if not is_covered(m)]
+            if not uncovered:
                 break
+            candidate = min(uncovered, key=max_sim_to_reps)
             representatives.append(candidate)
             remaining.remove(candidate)
 

@@ -44,6 +44,12 @@ class MMseqsConfig:
     evalue: float = 1e-5
     threads: int = 0  # 0 = mmseqs 自动检测
     work_dir: str = _DEFAULT_WORK_DIR  # build_index 持久化索引的存放目录
+    # mmseqs search/easy-search 的 --max-seqs 默认值均为 300, 会静默截断
+    # 单个 query 的命中数, 违背 STEP2/STEP5 文档"必须全量比对"的要求
+    # (第二轮漏洞4, 2026-10-03 与用户确认)。这里设为一个足够大的值作为
+    # "近似全量"(而非 0, mmseqs 不接受 0 表示不限), 兼顾大旁系家族场景与
+    # 内存开销; 如遇极端规模数据集仍需用户按需调大。
+    max_seqs: int = 100000
 
 
 class MMseqsAligner:
@@ -97,6 +103,8 @@ class MMseqsAligner:
                 str(self._config.sensitivity),
                 "-e",
                 str(self._config.evalue),
+                "--max-seqs",
+                str(self._config.max_seqs),
                 "--format-output",
                 _FORMAT_OUTPUT,
                 "--split",
@@ -267,6 +275,7 @@ class MMseqsAligner:
             "mmseqs", "search", query_db, index, result_db, work_dir,
             "-s", str(self._config.sensitivity),
             "-e", str(self._config.evalue),
+            "--max-seqs", str(self._config.max_seqs),
             "--split", "1",
             "-v", "1",
         ]

@@ -260,7 +260,14 @@ def test_cutoff_c_filters_out_low_coverage_hit_even_if_identity_passes():
 
 def test_cov_mode_query_only_ignores_low_subject_coverage():
     # cov_mode=2(仅看 query_cover): subject_cover 很低但 query_cover 达标,
-    # 在该模式下应被纳入(与 cov_mode=0 双向模式的结果不同)。
+    # 在该模式下"是否纳入SSN"的 inclusion 过滤应通过(与 cov_mode=0 双向
+    # 模式的结果不同), 故两个基因仍会落入同一个簇(n_clusters_final==1)。
+    #
+    # 但第二轮漏洞3修复(2026-10-03, 与用户确认)后, "高置信(cutoff_ii)"
+    # 判定统一改用双向 coverage(= min(query_cover, subject_cover))与
+    # cutoff_c 比较, 不受 cov_mode 影响——这里双向 coverage=0.1<cutoff_c=0.5,
+    # 不达标, 不会被误判为高置信, 所以应新增代表而非只做 member
+    # (n_representatives_final==2)。
     a = _gene("g1", 1, length=100)
     b = _gene("g2", 1, length=100)
     genome_a, intra_a = _make_genome_and_intra("g1", [a], [a.gene_id])
@@ -277,7 +284,7 @@ def test_cov_mode_query_only_ignores_low_subject_coverage():
     ).run({"g1": genome_a, "g2": genome_b}, {"g1": intra_a, "g2": intra_b})
 
     assert result.n_clusters_final == 1
-    assert result.n_representatives_final == 1
+    assert result.n_representatives_final == 2
 
 
 def test_cutoff_ii_high_identity_but_low_coverage_adds_new_representative():
