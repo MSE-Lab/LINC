@@ -14,16 +14,20 @@
        - full: 在 representative_member 基础上, 进一步补全簇内全部基因对
          (含成员-成员)关系; 同基因组内的成员-成员关系依然复用已有结果,
          只有跨基因组的成员对才真正发起新比对。性能方案(2026-10-02 与用户
-         确认, 修复"逐簇调用子进程"的性能问题): 不按"簇"循环调用比对,
-         而是先遍历全部活跃簇, 按"基因组对"聚合出需要查询的基因集合
-         (同一基因组对跨多个簇的 query 基因去重合并), 再对每个基因组对
-         只调用一次 AlignerPort.search(复用 IntraGenomeStage 已持久化的
-         genome_index 作为 target, 避免重新建库; tag=f"full_from_{genome_a}",
-         与 intra 阶段的 tag="intra_self"/join 阶段的 tag="join" 区分开,
-         避免三类调用写入同一个 `search/` 子目录互相覆盖, 2026-10-02 与
-         用户确认), 调用次数从 O(簇数×基因组对数) 降到 O(基因组对数);
-         search 结果按"双方是否属于同一个簇"过滤, 排除同一基因组对下属于
-         不同簇的无关比对结果。
+         确认, 修复"逐簇调用子进程"的性能问题; 2026-10-03 与用户确认,
+         进一步修复"仍是 O(基因组对数)次子进程调用"的性能问题): 不按"簇"
+         或"基因组对"循环调用比对, 而是先遍历全部活跃簇, 按"target 基因组"
+         聚合出需要查询的基因集合(同一 target 基因组下, 来自不同 source
+         基因组的 query 基因去重合并到同一个集合里), 再对每个 target
+         基因组只调用一次 AlignerPort.search(复用 IntraGenomeStage 已
+         持久化的 genome_index 作为 target, 避免重新建库; tag=
+         f"full_to_{genome_b}", 与 intra 阶段的 tag="intra_self"/join 阶段的
+         tag="join" 区分开, 避免三类调用写入同一个 `search/` 子目录互相
+         覆盖, 2026-10-02 与用户确认), 调用次数从 O(基因组对数)进一步降到
+         O(作为target出现过的基因组数)(最坏情况下从 O(G²) 降到 O(G));
+         search 结果按"双方是否属于同一个簇"过滤(该过滤本身与 query 具体
+         来自哪个 source 基因组无关, 因此按 target 合并查询不改变结果),
+         排除同一 target 基因组下属于不同簇的无关比对结果。
     3. 巨簇处理: 仅做信息提醒(超过 `mega_cluster_warning_threshold` 时记录
        warning), 不做自动降级或拆分 —— 与用户确认(2026-10-02): 任何跳过
        真实比对的"降级"或"拆分"都会让结果偏离"全对全比对"的最初设计目标,
@@ -194,15 +198,18 @@ class SSNBuilderStage:
         成员之间从未被比对过(IntraGenomeStage 只做单基因组内全对全比对,
         GlobalJoinStage 只比对代表)。
 
-        性能方案(2026-10-02 与用户确认, 修复"逐簇调用子进程"的性能问题):
-        不按"簇"循环发起比对调用(那样调用次数是 O(簇数×基因组对数), 簇数
-        一多开销会被迅速放大), 而是先遍历全部活跃簇, 按"基因组对"聚合出
-        需要查询的基因集合(同一基因组对跨多个簇的 query 基因去重合并),
-        再对每个基因组对只调用一次 `search`(复用 IntraGenomeStage 已持久化
-        的 `genome_index` 作为 target, 不重新建库), 调用次数降到
-        O(基因组对数), 与簇数无关; search 返回的结果可能包含"同一基因组对
+        性能方案(2026-10-02 与用户确认, 修复"逐簇调用子进程"的性能问题;
+        2026-10-03 与用户确认, 进一步修复"仍是 O(基因组对数)次子进程调用"
+        的性能问题): 不按"簇"或"基因组对"循环发起比对调用, 而是先遍历全部
+        活跃簇, 按"target 基因组"聚合出需要查询的基因集合(同一 target 基因组
+        下, 来自不同 source 基因组的 query 基因去重合并到同一个集合里),
+        再对每个 target 基因组只调用一次 `search`(复用 IntraGenomeStage 已
+        持久化的 `genome_index` 作为 target, 不重新建库), 调用次数从
+        O(基因组对数)进一步降到 O(作为target出现过的基因组数)(最坏情况下
+        从 O(G²) 降到 O(G)); search 返回的结果可能包含"同一 target 基因组
         下但分属不同簇"的无关基因对, 需按 `gene_id -> cluster_id` 映射过滤,
-        只保留双方属于同一个簇的结果。
+        只保留双方属于同一个簇的结果(该过滤本身与 query 具体来自哪个
+        source 基因组无关, 因此按 target 合并查询不会改变最终结果)。
 
         补边缺口修复(2026-10-03, 与用户确认, 第二轮漏洞1): 同一基因组、
         不同局部簇、但被全局合并进同一个全局簇的基因对, 之前既不在
@@ -243,9 +250,11 @@ class SSNBuilderStage:
             return lookup
 
         # 第一遍: 仅做簇内基因组分布统计(不涉及任何比对调用), 用于①巨簇
-        # warning 提醒 ②按基因组对聚合出去重后的 query 基因集合 ③顺带补齐
-        # "同基因组跨局部簇"的边(直接查表, 不算新比对)。
-        query_genes_by_genome_pair: Dict[tuple, Set[str]] = {}
+        # warning 提醒 ②按"target 基因组"聚合出去重后的 query 基因集合
+        # (2026-10-03 与用户确认, 从"按基因组对"改为"按 target 基因组"聚合,
+        # 把调用次数从 O(基因组对数) 降到 O(作为target出现过的基因组数))
+        # ③顺带补齐"同基因组跨局部簇"的边(直接查表, 不算新比对)。
+        query_genes_by_target_genome: Dict[str, Set[str]] = {}
         for cluster in global_lib.clusters:
             if not cluster.active:
                 continue
@@ -309,29 +318,35 @@ class SSNBuilderStage:
 
             for i, genome_a in enumerate(genome_ids):
                 for genome_b in genome_ids[i + 1:]:
-                    pair_key = (genome_a, genome_b)
-                    query_genes_by_genome_pair.setdefault(pair_key, set()).update(
+                    # 聚合键只用 target 基因组(genome_b), 不再按
+                    # (genome_a, genome_b) 对分组: 多个不同的 genome_a 若
+                    # 都需要查询同一个 genome_b, 它们的 query 基因会被合并
+                    # 到同一个集合里, 只触发一次 search(2026-10-03 与用户
+                    # 确认)。
+                    query_genes_by_target_genome.setdefault(genome_b, set()).update(
                         members_by_genome[genome_a]
                     )
 
         logger.info(
-            "SSNBuilderStage(full模式): 需要新发起比对的基因组对数=%d(与簇数无关)",
-            len(query_genes_by_genome_pair),
+            "SSNBuilderStage(full模式): 需要新发起比对的target基因组数=%d"
+            "(与簇数/基因组对数无关)",
+            len(query_genes_by_target_genome),
         )
 
-        # 第二遍: 每个基因组对只调用一次 search(复用已持久化的 genome_index),
-        # 不逐簇调用子进程。
-        for (genome_a, genome_b), query_gene_ids in query_genes_by_genome_pair.items():
+        # 第二遍: 每个 target 基因组只调用一次 search(复用已持久化的
+        # genome_index), 不逐簇、不逐基因组对调用子进程。
+        for genome_b, query_gene_ids in query_genes_by_target_genome.items():
             query_genes = [genes_by_id[gid] for gid in sorted(query_gene_ids)]
             intra_b = intra_results.get(genome_b)
             index_b = intra_b.genome_index if intra_b is not None else None
             if index_b is not None:
                 hits = self._aligner.search(
-                    query_genes, index_b, tag=f"full_from_{genome_a}"
+                    query_genes, index_b, tag=f"full_to_{genome_b}"
                 )
             else:
                 # 回退: 没有持久化索引可复用(如测试/某些 adapter 实现),
-                # 退化为一次性的便捷方法调用, 仍然按基因组对聚合, 不逐簇调用。
+                # 退化为一次性的便捷方法调用, 仍然按 target 基因组聚合,
+                # 不逐簇/逐基因组对调用。
                 subject_genes = [
                     gene for gid, gene in genes_by_id.items()
                     if gene.genome_id == genome_b
@@ -339,8 +354,9 @@ class SSNBuilderStage:
                 hits = self._aligner.align_query_vs_subject(query_genes, subject_genes)
 
             for hit in hits:
-                # search 的 target 是整个基因组b的索引, 可能命中该基因组对下
-                # 分属不同簇的无关基因, 只保留双方属于同一个簇的结果。
+                # search 的 target 是整个基因组b的索引, query 可能来自多个
+                # 不同的 source 基因组, 可能命中分属不同簇的无关基因, 只保留
+                # 双方属于同一个簇的结果。
                 if gene_cluster_map.get(hit.query_id) != gene_cluster_map.get(hit.subject_id):
                     continue
                 # 纳入判据修复(2026-10-03, 与用户确认, 第二轮漏洞2): 新发起

@@ -572,3 +572,74 @@ def test_full_mode_fills_same_genome_cross_local_cluster_gap(monkeypatch):
     # 补边直接查表复用, 不应触发任何新比对调用(簇内只有 A 这一个基因组,
     # 跨基因组比对逻辑不会被触发)
     assert align_calls["n"] == 0
+
+
+def test_full_mode_merges_multiple_source_genomes_sharing_same_target(monkeypatch):
+    """性能修复回归测试(2026-10-03 与用户确认): 多个不同的 source 基因组
+    若都需要查询同一个 target 基因组, 应只触发一次 search 调用(而不是
+    按基因组对各自调用), 把调用次数从 O(基因组对数) 进一步降到
+    O(作为target出现过的基因组数)。
+
+    构造: A/B/C 三个基因组各一个基因, 全局合并为一个簇; 按字典序排列的
+    基因组对是 (A,B)/(A,C)/(B,C), target 分别是 B/C/C —— C 被 A 和 B
+    两个不同的 source 基因组共同查询, 验证针对 C 的 search 只调用一次。
+    """
+    a1, b1, c1 = _gene("A|1", "A"), _gene("B|1", "B"), _gene("C|1", "C")
+    genomes = {
+        "A": Genome(genome_id="A", file_path="a.faa", genes=[a1]),
+        "B": Genome(genome_id="B", file_path="b.faa", genes=[b1]),
+        "C": Genome(genome_id="C", file_path="c.faa", genes=[c1]),
+    }
+    intra_results = {
+        gid: GenomeIntraResult(
+            genome_id=gid,
+            local_clusters=[
+                LocalCluster(cluster_id=f"{gid}|cluster_0", member_ids={f"{gid}|1"},
+                              representative_ids=[f"{gid}|1"], is_orphan=True),
+            ],
+            local_representatives=[f"{gid}|1"],
+            n_genes=1, n_clusters=1, n_representatives=1,
+            pairwise_hits=[],
+            genome_index=list(genomes[gid].genes),
+        )
+        for gid in ("A", "B", "C")
+    }
+    global_lib = GlobalRepresentativeLibrary(
+        clusters=[
+            GlobalCluster(
+                cluster_id="global|cluster_0",
+                representative_ids={"A|1"},
+                member_ids={"A|1", "B|1", "C|1"},
+                active=True,
+            )
+        ]
+    )
+    incremental_result = IncrementalResult(global_lib=global_lib, ssn_edges=set())
+
+    aligner = MockAligner()
+    aligner.set_result("A|1", "B|1", _hit("A|1", "B|1"))
+    aligner.set_result("A|1", "C|1", _hit("A|1", "C|1"))
+    aligner.set_result("B|1", "C|1", _hit("B|1", "C|1"))
+
+    search_calls_by_target = {}
+    original_search = aligner.search
+
+    def _counting_search(query, index, tag=None):
+        key = tuple(sorted(g.gene_id for g in query))
+        search_calls_by_target[key] = search_calls_by_target.get(key, 0) + 1
+        return original_search(query, index, tag=tag)
+
+    monkeypatch.setattr(aligner, "search", _counting_search)
+
+    stage = SSNBuilderStage(aligner=aligner, edge_completion_mode="full")
+    result = stage.run(genomes, intra_results, incremental_result)
+
+    # target=C 的 query 应合并 A|1 和 B|1 为同一次调用(而不是分两次)。
+    assert search_calls_by_target.get(("A|1", "B|1"), 0) == 1
+    # 总调用次数应为 2(target=B 一次, target=C 一次), 而非 3(按基因组对)。
+    assert sum(search_calls_by_target.values()) == 2
+
+    actual_pairs = {frozenset((e.source, e.target)) for e in result.edges}
+    assert frozenset(("A|1", "B|1")) in actual_pairs
+    assert frozenset(("A|1", "C|1")) in actual_pairs
+    assert frozenset(("B|1", "C|1")) in actual_pairs
