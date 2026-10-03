@@ -277,8 +277,9 @@ def test_build_index_reuses_existing_index_without_calling_subprocess(monkeypatc
 
     monkeypatch.setattr(subprocess, "run", _should_not_be_called)
 
-    aligner = MMseqsAligner(MMseqsConfig(work_dir=_tmp_work_dir(tmp_path)))
-    index_dir = os.path.join(str(tmp_path), "genome_x")
+    work_dir = _tmp_work_dir(tmp_path)
+    aligner = MMseqsAligner(MMseqsConfig(work_dir=work_dir))
+    index_dir = os.path.join(work_dir, "genome_x")
     os.makedirs(index_dir, exist_ok=True)
     db_path = os.path.join(index_dir, "db")
     with open(db_path, "w", encoding="utf-8") as fh:

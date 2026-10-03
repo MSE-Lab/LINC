@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import pickle
+import uuid
 from typing import Any, Dict, List, Optional
 
 from ...core.entities import CompleteSSN, Genome, GenomeIntraResult, IncrementalResult, OrthologFamily
@@ -76,9 +77,28 @@ class FileRepository:
         self._state_dir = work_dir
         os.makedirs(self._state_dir, exist_ok=True)
         self._append_history_path = os.path.join(self._state_dir, "append_history.jsonl")
+        self._run_id_path = os.path.join(self._state_dir, "run_id.pkl")
+        self._run_id: Optional[str] = None
 
     def _path(self, key: str) -> str:
         return os.path.join(self._state_dir, self._FILES[key])
+
+    def _get_or_create_run_id(self) -> str:
+        """获取本次(逻辑意义上的)运行标识(工程审查问题3, 2026-10-03 与用户
+        确认)。首次调用(目录下尚无 `run_id.pkl`)时生成一个新 UUID 并落盘;
+        resume/append 场景下该文件已存在, 直接复用, 代表与上次是"同一次
+        逻辑运行"的延续。
+        """
+        if self._run_id is not None:
+            return self._run_id
+        if os.path.exists(self._run_id_path):
+            with open(self._run_id_path, "rb") as fh:
+                self._run_id = pickle.load(fh)
+        else:
+            self._run_id = str(uuid.uuid4())
+            with open(self._run_id_path, "wb") as fh:
+                pickle.dump(self._run_id, fh)
+        return self._run_id
 
     def _save(self, key: str, obj) -> None:
         # gzip 压缩写入(2026-10-02, 方案A): 大规模场景下显著降低磁盘占用,
@@ -87,7 +107,11 @@ class FileRepository:
         # {"__schema_version__": N, "payload": obj}, 供 `_load()` 校验。
         path = self._path(key)
         tmp_path = path + ".tmp"
-        wrapped = {"__schema_version__": self.SCHEMA_VERSION, "payload": obj}
+        wrapped = {
+            "__schema_version__": self.SCHEMA_VERSION,
+            "__run_id__": self._get_or_create_run_id(),
+            "payload": obj,
+        }
         with gzip.open(tmp_path, "wb") as fh:
             pickle.dump(wrapped, fh)
         os.replace(tmp_path, path)
@@ -136,6 +160,14 @@ class FileRepository:
                     f"当前代码要求 schema_version={self.SCHEMA_VERSION}; 这通常发生在"
                     f"代码升级后旧的 .linc_work/state/ 目录未重新生成, 请删除该目录"
                     f"后重新完整运行(会丢失已完成的进度, 需要重新开始)。"
+                )
+            file_run_id = raw.get("__run_id__")
+            if file_run_id is not None and file_run_id != self._get_or_create_run_id():
+                raise StateCorruptedError(
+                    f"检测到状态文件来自不同运行: {path} 的 run_id={file_run_id}, "
+                    f"与当前 .linc_work/state/ 目录的 run_id={self._run_id} 不一致; "
+                    f"这通常意味着 state 目录中的文件被手工替换/从别处拷贝拼接过, "
+                    f"请删除 .linc_work 后重新完整运行, 不要混用不同运行的状态文件。"
                 )
             return raw["payload"]
         logger.warning(

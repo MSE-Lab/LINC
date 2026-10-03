@@ -239,6 +239,54 @@ def test_legacy_file_without_schema_version_marker_loads_with_warning(tmp_path, 
     assert loaded["g1"].genome_id == "g1"
 
 
+def test_run_id_is_persisted_and_reused_across_saves(tmp_path):
+    """工程审查问题3(2026-10-03 与用户确认): 同一个 FileRepository 实例内
+    多次 save_*() 应共用同一个 run_id, 且跨进程(新实例)复用 resume 场景下
+    会读到同一个已落盘的 run_id, 而不是每次都重新生成。"""
+    state_dir = str(tmp_path / "state")
+    repo1 = FileRepository(state_dir)
+    repo1.save_genomes({})
+    run_id_1 = repo1._get_or_create_run_id()
+
+    repo1.save_input_signature([("a.faa", 1, 1.0)])
+    assert repo1._get_or_create_run_id() == run_id_1
+
+    repo2 = FileRepository(state_dir)
+    assert repo2._get_or_create_run_id() == run_id_1
+
+
+def test_run_id_mismatch_raises_state_corrupted_error(tmp_path):
+    """工程审查问题3(2026-10-03 与用户确认): 若 state 目录中某个文件的
+    run_id 与目录当前的 run_id 不一致(典型场景: 文件被从别处拷贝拼接过),
+    加载时应抛出 `StateCorruptedError`, 而不是静默当作同一次运行使用。"""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    genome = Genome(genome_id="g1", file_path="g1.faa")
+    wrapped = {
+        "__schema_version__": FileRepository.SCHEMA_VERSION,
+        "__run_id__": "run-from-another-execution",
+        "payload": {"g1": genome},
+    }
+    with gzip.open(state_dir / "genomes.pkl", "wb") as fh:
+        pickle.dump(wrapped, fh)
+
+    repo = FileRepository(str(state_dir))
+    with pytest.raises(StateCorruptedError):
+        repo.load_genomes()
+
+
+def test_run_id_consistent_across_multiple_files_in_same_run(tmp_path):
+    """同一次运行内保存的多个文件应携带相同的 run_id, 正常加载不应报错。"""
+    state_dir = str(tmp_path / "state")
+    repo = FileRepository(state_dir)
+    repo.save_genomes({})
+    repo.save_config({"cutoff_i": 0.5})
+
+    # 正常加载不应抛出任何异常。
+    assert repo.load_genomes() == {}
+    assert repo.load_config() == {"cutoff_i": 0.5}
+
+
 def test_config_roundtrip_across_instances(tmp_path):
     """工程审查问题1(2026-10-03 与用户确认): 算法参数应可持久化并跨进程
     加载, 供 --resume/--append 校验一致性。"""
