@@ -264,6 +264,32 @@ def test_build_index_runs_createdb_and_returns_persistent_db_path(monkeypatch, t
     assert "genome_x" in index
 
 
+def test_build_index_reuses_existing_index_without_calling_subprocess(monkeypatch, tmp_path):
+    """幂等性回归测试(工程审查 force 风险修复, 2026-10-03 与用户确认):
+    若 index_id 对应的索引文件已存在且有效(index_exists 为 True), build_index
+    应直接复用返回现有路径, 不重新调用 createdb 子进程——避免 --force 全量
+    重算等场景下对序列未变、仅算法参数变化的历史基因组做冗余建库。
+    """
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
+
+    def _should_not_be_called(*args, **kwargs):
+        raise AssertionError("subprocess.run 不应被调用(应复用已存在的索引)")
+
+    monkeypatch.setattr(subprocess, "run", _should_not_be_called)
+
+    aligner = MMseqsAligner(MMseqsConfig(work_dir=_tmp_work_dir(tmp_path)))
+    index_dir = os.path.join(str(tmp_path), "genome_x")
+    os.makedirs(index_dir, exist_ok=True)
+    db_path = os.path.join(index_dir, "db")
+    with open(db_path, "w", encoding="utf-8") as fh:
+        fh.write("fake db")
+    with open(f"{db_path}.dbtype", "w", encoding="utf-8") as fh:
+        fh.write("fake dbtype")
+
+    index = aligner.build_index([_gene("g1|1", 100)], index_id="genome_x")
+    assert index == db_path
+
+
 def test_build_index_empty_genes_returns_none_without_calling_subprocess(monkeypatch, tmp_path):
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
 

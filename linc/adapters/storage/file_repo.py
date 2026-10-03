@@ -38,8 +38,28 @@ class StateCorruptedError(RuntimeError):
     """
 
 
+class SchemaVersionMismatchError(StateCorruptedError):
+    """持久化状态文件的 schema 版本与当前代码不兼容(工程审查问题2,
+    2026-10-03 与用户确认)。
+
+    代码升级后给某个 Stage 的产出 dataclass 新增/删除字段时, 旧版本的
+    pickle 文件仍能"成功"反序列化, 但后续代码访问新字段会抛出语义不清的
+    `AttributeError`。引入 `SCHEMA_VERSION` 标记后, 版本不匹配时改为在
+    反序列化阶段就抛出这个明确的异常, 提示用户版本不兼容, 而不是让错误
+    延迟到下游某个随机位置才暴露。
+    """
+
+
 class FileRepository:
     """RepositoryPort 的文件(pickle)实现, 支持跨进程 resume/append。"""
+
+    # schema 版本控制(工程审查问题2, 2026-10-03 与用户确认): 每次给任意
+    # 持久化 dataclass(GenomeIntraResult/IncrementalResult/CompleteSSN 等)
+    # 新增/删除/改变语义的字段时, 必须手动递增此常量。`_save()` 会把该版本
+    # 号与实际数据一并写入每个 pickle 文件; `_load()` 读取时校验版本号,
+    # 不匹配则抛出 `SchemaVersionMismatchError`, 而不是让程序在下游某个
+    # 随机位置因缺字段抛出语义不清的 `AttributeError`。
+    SCHEMA_VERSION = 1
 
     _FILES = {
         "genomes": "genomes.pkl",
@@ -63,10 +83,13 @@ class FileRepository:
     def _save(self, key: str, obj) -> None:
         # gzip 压缩写入(2026-10-02, 方案A): 大规模场景下显著降低磁盘占用,
         # 不改变整体"写临时文件再原子替换"的落盘语义。
+        # schema 版本标记(2026-10-03, 工程审查问题2): 实际数据包一层
+        # {"__schema_version__": N, "payload": obj}, 供 `_load()` 校验。
         path = self._path(key)
         tmp_path = path + ".tmp"
+        wrapped = {"__schema_version__": self.SCHEMA_VERSION, "payload": obj}
         with gzip.open(tmp_path, "wb") as fh:
-            pickle.dump(obj, fh)
+            pickle.dump(wrapped, fh)
         os.replace(tmp_path, path)
 
     def _load(self, key: str):
@@ -75,13 +98,13 @@ class FileRepository:
             return None
         try:
             with gzip.open(path, "rb") as fh:
-                return pickle.load(fh)
+                raw = pickle.load(fh)
         except gzip.BadGzipFile:
             # 向后兼容(2026-10-02引入gzip压缩之前写入的旧版非压缩pickle文件):
             # 不视为损坏, 直接按原始pickle格式读取。
             try:
                 with open(path, "rb") as fh:
-                    return pickle.load(fh)
+                    raw = pickle.load(fh)
             except Exception as exc:  # noqa: BLE001 - 任何反序列化失败都视为损坏
                 logger.error("持久化状态文件损坏, 无法反序列化: %s", path, exc_info=True)
                 raise StateCorruptedError(
@@ -94,6 +117,33 @@ class FileRepository:
                 f"持久化状态文件损坏, 无法反序列化: {path}; 请检查 .linc_work/state/ "
                 f"目录是否被意外修改/截断, 不建议直接删除后重跑(会丢失已完成的工作)。"
             ) from exc
+        return self._unwrap_schema(raw, path)
+
+    def _unwrap_schema(self, raw, path: str):
+        """校验并剥离 schema 版本标记(工程审查问题2, 2026-10-03 与用户确认)。
+
+        - 带有 `__schema_version__` 标记(本次改动之后写入的新格式): 版本号
+          必须与当前 `SCHEMA_VERSION` 一致, 否则抛出 `SchemaVersionMismatchError`。
+        - 不带标记(本次改动之前写入的旧版文件, 无版本概念): 向后兼容, 仅打印
+          warning 并原样返回数据, 不报错(与 `input_signature` 旧格式兼容的
+          处理原则一致)。
+        """
+        if isinstance(raw, dict) and "__schema_version__" in raw and "payload" in raw:
+            version = raw["__schema_version__"]
+            if version != self.SCHEMA_VERSION:
+                raise SchemaVersionMismatchError(
+                    f"持久化状态文件版本不兼容: {path} 的 schema_version={version}, "
+                    f"当前代码要求 schema_version={self.SCHEMA_VERSION}; 这通常发生在"
+                    f"代码升级后旧的 .linc_work/state/ 目录未重新生成, 请删除该目录"
+                    f"后重新完整运行(会丢失已完成的进度, 需要重新开始)。"
+                )
+            return raw["payload"]
+        logger.warning(
+            "持久化状态文件 %s 不带 schema_version 标记(本次引入版本控制之前写入的"
+            "旧版文件), 将按当前版本原样使用, 不做兼容性校验。",
+            path,
+        )
+        return raw
 
     def _exists(self, key: str) -> bool:
         return os.path.exists(self._path(key))

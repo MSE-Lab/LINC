@@ -4,7 +4,11 @@ import pickle
 
 import pytest
 
-from linc.adapters.storage.file_repo import FileRepository, StateCorruptedError
+from linc.adapters.storage.file_repo import (
+    FileRepository,
+    SchemaVersionMismatchError,
+    StateCorruptedError,
+)
 from linc.core.entities import CompleteSSN, Genome, GenomeIntraResult, IncrementalResult, OrthologFamily
 from linc.ports.storage_port import RepositoryPort
 
@@ -135,7 +139,12 @@ def test_load_falls_back_to_plain_pickle_for_legacy_uncompressed_files(tmp_path)
 
 
 def test_gzip_roundtrip_matches_manual_gzip_write(tmp_path):
-    """确认 FileRepository 写入的文件能被标准 gzip 工具正常解压, 不是自定义格式。"""
+    """确认 FileRepository 写入的文件能被标准 gzip 工具正常解压, 不是自定义格式。
+
+    注: 文件内容是 `{"__schema_version__": N, "payload": obj}` 包装格式
+    (工程审查问题2, 2026-10-03 与用户确认引入的 schema 版本标记), 这里需要
+    先解出 "payload" 才是真正的 `IncrementalResult` 对象。
+    """
     state_dir = tmp_path / "state"
     repo = FileRepository(str(state_dir))
     result = IncrementalResult(cluster_counter=7)
@@ -143,8 +152,9 @@ def test_gzip_roundtrip_matches_manual_gzip_write(tmp_path):
 
     path = state_dir / "join_result.pkl"
     with gzip.open(path, "rb") as fh:
-        obj = pickle.load(fh)
-    assert obj.cluster_counter == 7
+        raw = pickle.load(fh)
+    assert raw["__schema_version__"] == FileRepository.SCHEMA_VERSION
+    assert raw["payload"].cluster_counter == 7
 
 
 def test_append_audit_log_accumulates_across_calls(tmp_path):
@@ -186,6 +196,47 @@ def test_append_audit_log_is_human_readable_json_lines(tmp_path):
     assert len(lines) == 2
     import json
     assert json.loads(lines[0]) == {"timestamp": "t1", "new_genome_ids": ["g2"]}
+
+
+def test_schema_version_mismatch_raises_clear_error(tmp_path):
+    """工程审查问题2(2026-10-03 与用户确认): 持久化文件标记的 schema_version
+    与当前代码不一致时, 应抛出 `SchemaVersionMismatchError`(而不是让程序
+    继续用缺字段/错类型的旧数据跑下去, 在下游某个随机位置抛出语义不清的
+    AttributeError)。"""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    genome = Genome(genome_id="g1", file_path="g1.faa")
+    wrapped = {"__schema_version__": 999, "payload": {"g1": genome}}
+    with gzip.open(state_dir / "genomes.pkl", "wb") as fh:
+        pickle.dump(wrapped, fh)
+
+    repo = FileRepository(str(state_dir))
+    with pytest.raises(SchemaVersionMismatchError):
+        repo.load_genomes()
+
+
+def test_schema_version_mismatch_is_subclass_of_state_corrupted_error(tmp_path):
+    """`SchemaVersionMismatchError` 应是 `StateCorruptedError` 的子类,
+    使 cli.py 中既有的 `except StateCorruptedError` 分支能一并捕获,
+    无需额外修改异常处理代码。"""
+    assert issubclass(SchemaVersionMismatchError, StateCorruptedError)
+
+
+def test_legacy_file_without_schema_version_marker_loads_with_warning(tmp_path, caplog):
+    """向后兼容(2026-10-03 与用户确认): 本次引入 schema_version 标记之前
+    写入的旧版文件(无 `__schema_version__` 包装)不应被判定为版本不兼容,
+    仅打印 warning 并原样按当前版本继续使用。"""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    genome = Genome(genome_id="g1", file_path="g1.faa")
+    # 模拟本次改动之前的写入方式: 不包 __schema_version__ 包装, 直接 pickle
+    # 原始数据。
+    with gzip.open(state_dir / "genomes.pkl", "wb") as fh:
+        pickle.dump({"g1": genome}, fh)
+
+    repo = FileRepository(str(state_dir))
+    loaded = repo.load_genomes()
+    assert loaded["g1"].genome_id == "g1"
 
 
 def test_config_roundtrip_across_instances(tmp_path):

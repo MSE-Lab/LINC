@@ -191,6 +191,12 @@ class MMseqsAligner:
         与 `_run_mmseqs_search`(easy-search 一把梭, 每次都重建+清理)不同,
         本方法把 DB 建在 `MMseqsConfig.work_dir` 下、以 index_id 命名的子目录,
         调用结束后不清理, 供后续 `search` 反复复用(不重新 createdb)。
+
+        幂等性(工程审查 force 风险修复, 2026-10-03 与用户确认): 建库前先用
+        `index_exists()` 检查该 index_id 对应的索引是否已存在且有效, 若存在
+        直接复用返回现有路径, 不重新执行 createdb——避免 `--force` 全量重算
+        等场景下对序列未变、仅算法参数变化的历史基因组做冗余建库, 同时减少
+        一个本可避免的失败点(建库涉及文件写入与子进程调用)。
         """
         if not genes:
             return None
@@ -199,6 +205,8 @@ class MMseqsAligner:
         os.makedirs(index_dir, exist_ok=True)
         fasta_path = os.path.join(index_dir, "genes.fasta")
         db_path = os.path.join(index_dir, "db")
+        if self.index_exists(db_path):
+            return db_path
         self._write_fasta(genes, fasta_path)
         cmd = ["mmseqs", "createdb", fasta_path, db_path, "-v", "1"]
         logger.debug("调用 mmseqs: %s", " ".join(cmd))

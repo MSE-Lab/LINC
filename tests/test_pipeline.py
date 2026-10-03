@@ -439,3 +439,62 @@ def test_append_force_recomputes_historical_intra_and_full_rejoin(tmp_path):
     assert len(force_entries) == 1
     assert force_entries[0]["action"] == "append"
     assert "inflation" in force_entries[0]["mismatched_fields"]
+
+
+def test_resume_crash_mid_way_does_not_prematurely_overwrite_config(tmp_path, monkeypatch):
+    """`save_config()` 时机修复回归测试(2026-10-03 与用户确认): config.pkl
+    必须等全部 Stage 产出都已成功落盘之后才保存, 否则一旦 resume 中途崩溃,
+    config.pkl 会被"提前"更新为本次(新)参数, 导致下一次 resume 的一致性
+    校验对比的是"已经被更新过的历史 config", 无法察觉真正的参数不一致。
+
+    场景: 先完整 run() 一次(参数A); 再用参数B + force=True 发起 resume,
+    但在 _run_join 阶段模拟崩溃(抛异常); 崩溃后 config.pkl 应仍是参数A
+    (而不是被提前写成参数B); 随后用参数B(不带force)再次 resume, 必须
+    正确抛出 ConfigMismatchError(因为历史 config 仍是A, 与本次B不一致),
+    而不是因为"历史 config 已被上次崩溃的运行悄悄改成B"而误判为一致、
+    静默放行。
+    """
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    file_path = input_dir / "g1.faa"
+    _write_fasta(str(file_path), [("x", "MKV"), ("y", "MKL")])
+
+    repo = FileRepository(str(tmp_path / "state"))
+    pipeline = _make_pipeline(repo)
+    pipeline.run([str(file_path)])
+
+    historical_config = repo.load_config()
+    assert historical_config["cutoff_i"] == PipelineConfig().cutoff_i
+
+    crashing_pipeline = Pipeline(
+        aligner=MockAligner(),
+        clustering_for_intra=UnionFindClustering(),
+        clustering_for_mcl=UnionFindClustering(),
+        repository=repo,
+        config=PipelineConfig(cutoff_i=0.9),
+    )
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("模拟 resume 中途崩溃")
+
+    monkeypatch.setattr(crashing_pipeline, "_run_join", _boom)
+
+    with pytest.raises(RuntimeError, match="模拟 resume 中途崩溃"):
+        crashing_pipeline.resume([str(file_path)], force=True)
+
+    # 崩溃之后, config.pkl 不应被提前改写为本次(新)参数。
+    config_after_crash = repo.load_config()
+    assert config_after_crash["cutoff_i"] == historical_config["cutoff_i"]
+    assert config_after_crash["cutoff_i"] != 0.9
+
+    # 再次用同样的新参数(不带 force)resume, 必须正确检测出不一致并报错,
+    # 而不是因为 config.pkl 已被悄悄改写而误判为一致。
+    retry_pipeline = Pipeline(
+        aligner=MockAligner(),
+        clustering_for_intra=UnionFindClustering(),
+        clustering_for_mcl=UnionFindClustering(),
+        repository=repo,
+        config=PipelineConfig(cutoff_i=0.9),
+    )
+    with pytest.raises(ConfigMismatchError):
+        retry_pipeline.resume([str(file_path)])

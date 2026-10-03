@@ -308,9 +308,6 @@ class Pipeline:
         self._repository.save_input_signature(
             build_input_signature(genome_files)
         )
-        # 工程审查问题1(2026-10-03 与用户确认): 持久化本次运行使用的全部
-        # 算法参数, 供后续 --resume/--append 校验一致性。
-        self._repository.save_config(asdict(self._config))
 
         genomes = GenomeLoadStage().run(genome_files)
         self._repository.save_genomes(genomes)
@@ -328,6 +325,14 @@ class Pipeline:
 
         families = self._run_family(complete_ssn, intra_results)
         self._repository.save_families(families)
+
+        # 工程审查问题1(2026-10-03 与用户确认; 2026-10-03 再次确认挪到末尾):
+        # 持久化本次运行使用的全部算法参数, 供后续 --resume/--append 校验
+        # 一致性。必须等全部 Stage 产出都已成功落盘之后才保存, 否则一旦中途
+        # 崩溃, config.pkl 会被"提前"更新为本次参数, 而部分 Stage 产出仍是
+        # 旧参数(甚至是上一次运行遗留)的残留文件, 导致下次 resume 时一致性
+        # 校验对比的是"已经被更新过的历史 config", 无法察觉这个不一致。
+        self._repository.save_config(asdict(self._config))
 
         return PipelineResult(
             genomes=genomes,
@@ -351,7 +356,6 @@ class Pipeline:
         """
         repo = self._repository
         forced_override = self._check_config_consistency(force=force, action="resume")
-        repo.save_config(asdict(self._config))
 
         if repo.has_genomes():
             genomes = repo.load_genomes()
@@ -391,6 +395,11 @@ class Pipeline:
         else:
             families = repo.load_families()
 
+        # 工程审查问题1(2026-10-03 与用户确认; 2026-10-03 再次确认挪到末尾):
+        # 待全部 Stage 产出都已成功落盘(或确认复用历史缓存无误)后才保存本次
+        # 参数, 避免中途崩溃导致 config.pkl 与实际落盘的 Stage 结果不一致。
+        repo.save_config(asdict(self._config))
+
         return PipelineResult(
             genomes=genomes,
             intra_results=intra_results,
@@ -419,7 +428,6 @@ class Pipeline:
         """
         repo = self._repository
         forced_override = self._check_config_consistency(force=force, action="append")
-        repo.save_config(asdict(self._config))
 
         historical_genomes = repo.load_genomes()
         historical_intra = repo.load_intra_results()
@@ -483,6 +491,11 @@ class Pipeline:
                 "skipped_genome_ids": [],
             }
         )
+
+        # 工程审查问题1(2026-10-03 与用户确认; 2026-10-03 再次确认挪到末尾):
+        # 待全部 Stage 产出都已成功落盘后才保存本次参数, 避免中途崩溃导致
+        # config.pkl 与实际落盘的 Stage 结果不一致。
+        repo.save_config(asdict(self._config))
 
         return PipelineResult(
             genomes=merged_genomes,
