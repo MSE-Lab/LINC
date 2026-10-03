@@ -665,3 +665,68 @@ def test_run_append_conflicting_genome_id_exits_with_error(tmp_path):
         app, ["run", "-i", str(input_dir), "-o", str(output_dir), "-a", str(append_dir)],
     )
     assert result.exit_code != 0
+
+
+# ---- 工程审查问题1(2026-10-03 与用户确认): resume/append 算法参数一致性校验 ----
+
+def test_run_resume_with_different_cutoff_exits_with_error(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    first = runner.invoke(app, ["run", "-i", str(input_dir), "-o", str(output_dir)])
+    assert first.exit_code == 0
+
+    result = runner.invoke(
+        app,
+        [
+            "run", "-i", str(input_dir), "-o", str(output_dir), "--resume",
+            "--cutoff-i", "0.9",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "cutoff_i" in result.stdout or "cutoff_i" in (result.stderr or "")
+
+
+def test_run_resume_with_different_cutoff_and_force_succeeds(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    first = runner.invoke(app, ["run", "-i", str(input_dir), "-o", str(output_dir)])
+    assert first.exit_code == 0
+
+    result = runner.invoke(
+        app,
+        [
+            "run", "-i", str(input_dir), "-o", str(output_dir), "--resume",
+            "--cutoff-i", "0.9", "--force",
+        ],
+    )
+    assert result.exit_code == 0
+
+
+def test_run_append_with_different_inflation_exits_with_error(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    first = runner.invoke(app, ["run", "-i", str(input_dir), "-o", str(output_dir)])
+    assert first.exit_code == 0
+
+    append_dir = tmp_path / "append"
+    append_dir.mkdir()
+    _write_fasta(str(append_dir / "genome02.faa"), [("g2", "MKV")])
+
+    result = runner.invoke(
+        app,
+        [
+            "run", "-i", str(input_dir), "-o", str(output_dir),
+            "-a", str(append_dir), "--inflation", "3.0",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "inflation" in result.stdout or "inflation" in (result.stderr or "")

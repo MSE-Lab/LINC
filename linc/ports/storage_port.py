@@ -109,3 +109,14 @@ class RepositoryPort(Protocol):
     def load_append_history(self) -> List[Dict[str, Any]]:
         """加载全部历史 `--append` 审计记录(按写入顺序), 不存在则返回空列表。"""
         ...
+
+    def save_config(self, config: Dict[str, Any]) -> None:
+        """保存本次运行使用的全部算法参数(`dataclasses.asdict(PipelineConfig)`),
+        供 `--resume`/`--append` 校验参数一致性(工程审查问题1, 2026-10-03
+        与用户确认)。"""
+        ...
+
+    def load_config(self) -> Optional[Dict[str, Any]]:
+        """加载历史保存的算法参数字典, 不存在则返回 None(兼容本次改动之前
+        写入的旧版 state, 此时跳过参数一致性校验并给出 warning)。"""
+        ...

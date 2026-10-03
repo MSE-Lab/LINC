@@ -21,6 +21,7 @@ class FakeRepository:
         self._families: List[OrthologFamily] = []
         self._input_signature: Optional[List[str]] = None
         self._append_history: List[dict] = []
+        self._config: Optional[dict] = None
 
     def save_genomes(self, genomes):
         self._genomes = genomes
@@ -78,6 +79,12 @@ class FakeRepository:
 
     def load_append_history(self):
         return self._append_history
+
+    def save_config(self, config):
+        self._config = dict(config)
+
+    def load_config(self):
+        return self._config
 
 
 def test_fake_repository_satisfies_protocol_via_isinstance():
@@ -140,6 +147,13 @@ def test_append_history_accumulates_instead_of_overwriting():
         {"new_genome_ids": ["g2"]},
         {"new_genome_ids": ["g3"]},
     ]
+
+
+def test_config_roundtrip():
+    repo: RepositoryPort = FakeRepository()
+    assert repo.load_config() is None
+    repo.save_config({"cutoff_i": 0.5, "inflation": 1.5})
+    assert repo.load_config() == {"cutoff_i": 0.5, "inflation": 1.5}
 
 
 def test_incomplete_implementation_fails_isinstance_check():

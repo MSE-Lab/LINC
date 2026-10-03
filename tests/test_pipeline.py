@@ -6,7 +6,7 @@ import pytest
 from linc.adapters.aligners.mock_adapter import MockAligner
 from linc.adapters.clustering.union_find_adapter import UnionFindClustering
 from linc.adapters.storage.file_repo import FileRepository
-from linc.pipeline import IndexMissingError, Pipeline, PipelineConfig
+from linc.pipeline import ConfigMismatchError, IndexMissingError, Pipeline, PipelineConfig
 
 
 class _IndexAlwaysMissingAligner(MockAligner):
@@ -203,3 +203,117 @@ def test_append_writes_audit_log_entry(tmp_path):
     history_after_second = repo.load_append_history()
     assert len(history_after_second) == 2
     assert history_after_second[1]["new_genome_ids"] == ["gC"]
+
+
+def test_resume_raises_config_mismatch_error_when_cutoff_differs(tmp_path):
+    """工程审查问题1回归测试(2026-10-03 与用户确认): --resume 时若本次算法
+    参数与历史持久化的参数不一致, 应抛出 ConfigMismatchError 而非静默用
+    新参数混搭历史结果继续跑。"""
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    file_path = input_dir / "g1.faa"
+    _write_fasta(str(file_path), [("x", "MKV")])
+
+    repo = FileRepository(str(tmp_path / "state"))
+    pipeline = _make_pipeline(repo)
+    pipeline.run([str(file_path)])
+
+    mismatched_pipeline = Pipeline(
+        aligner=MockAligner(),
+        clustering_for_intra=UnionFindClustering(),
+        clustering_for_mcl=UnionFindClustering(),
+        repository=repo,
+        config=PipelineConfig(cutoff_i=0.9),
+    )
+    with pytest.raises(ConfigMismatchError) as exc_info:
+        mismatched_pipeline.resume([str(file_path)])
+    assert "cutoff_i" in str(exc_info.value)
+
+
+def test_resume_with_force_bypasses_config_mismatch_and_updates_saved_config(tmp_path):
+    """--force 应仅记 warning 后继续执行, 且之后再次 resume(不带 force)
+    应以"本次已更新保存的参数"为新基准, 不再报错(2026-10-03 与用户确认)。"""
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    file_path = input_dir / "g1.faa"
+    _write_fasta(str(file_path), [("x", "MKV")])
+
+    repo = FileRepository(str(tmp_path / "state"))
+    pipeline = _make_pipeline(repo)
+    pipeline.run([str(file_path)])
+
+    forced_pipeline = Pipeline(
+        aligner=MockAligner(),
+        clustering_for_intra=UnionFindClustering(),
+        clustering_for_mcl=UnionFindClustering(),
+        repository=repo,
+        config=PipelineConfig(cutoff_i=0.9),
+    )
+    forced_pipeline.resume([str(file_path)], force=True)
+
+    assert repo.load_config()["cutoff_i"] == 0.9
+
+    again_pipeline = Pipeline(
+        aligner=MockAligner(),
+        clustering_for_intra=UnionFindClustering(),
+        clustering_for_mcl=UnionFindClustering(),
+        repository=repo,
+        config=PipelineConfig(cutoff_i=0.9),
+    )
+    # 不应再抛出 ConfigMismatchError(基准已更新为0.9)。
+    again_pipeline.resume([str(file_path)])
+
+
+def test_append_raises_config_mismatch_error_when_inflation_differs(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    file_a = input_dir / "gA.faa"
+    _write_fasta(str(file_a), [("x", "MKV")])
+
+    repo = FileRepository(str(tmp_path / "state"))
+    pipeline = _make_pipeline(repo)
+    pipeline.run([str(file_a)])
+
+    append_dir = tmp_path / "append"
+    append_dir.mkdir()
+    file_b = append_dir / "gB.faa"
+    _write_fasta(str(file_b), [("y", "MKL")])
+
+    mismatched_pipeline = Pipeline(
+        aligner=MockAligner(),
+        clustering_for_intra=UnionFindClustering(),
+        clustering_for_mcl=UnionFindClustering(),
+        repository=repo,
+        config=PipelineConfig(inflation=3.0),
+    )
+    with pytest.raises(ConfigMismatchError) as exc_info:
+        mismatched_pipeline.append([str(file_b)])
+    assert "inflation" in str(exc_info.value)
+
+
+def test_resume_skips_config_check_with_warning_when_no_historical_config(tmp_path, caplog):
+    """历史 state 不存在 config.pkl(本次改动之前写入的旧版 state)时,
+    应仅打印 warning 并放行, 不阻断 resume(向后兼容)。"""
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    file_path = input_dir / "g1.faa"
+    _write_fasta(str(file_path), [("x", "MKV")])
+
+    repo = FileRepository(str(tmp_path / "state"))
+    pipeline = _make_pipeline(repo)
+    pipeline.run([str(file_path)])
+
+    # 模拟旧版 state(本次改动之前写入, 没有 config.pkl)。
+    config_path = tmp_path / "state" / "config.pkl"
+    assert config_path.exists()
+    os.remove(config_path)
+
+    different_pipeline = Pipeline(
+        aligner=MockAligner(),
+        clustering_for_intra=UnionFindClustering(),
+        clustering_for_mcl=UnionFindClustering(),
+        repository=repo,
+        config=PipelineConfig(cutoff_i=0.9),
+    )
+    # 不应抛出 ConfigMismatchError(无法校验, 跳过)。
+    different_pipeline.resume([str(file_path)])

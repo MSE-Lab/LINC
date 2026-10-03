@@ -48,6 +48,7 @@ class FileRepository:
         "complete_ssn": "complete_ssn.pkl",
         "families": "families.pkl",
         "input_signature": "input_signature.pkl",
+        "config": "config.pkl",
     }
 
     def __init__(self, work_dir: str) -> None:
@@ -159,6 +160,13 @@ class FileRepository:
 
     def load_input_signature(self) -> Optional[List[Any]]:
         return self._load("input_signature")
+
+    # ---- 算法参数一致性校验(工程审查问题1, 2026-10-03 与用户确认) ----
+    def save_config(self, config: Dict[str, Any]) -> None:
+        self._save("config", dict(config))
+
+    def load_config(self) -> Optional[Dict[str, Any]]:
+        return self._load("config")
 
     # ---- --append 审计轨迹(数据管理优化第1项, 2026-10-03 与用户确认) ----
     # 用 JSON Lines(每行一条独立的 JSON 对象)而非 pickle 存储: 人类可读,

@@ -105,3 +105,20 @@ def test_append_audit_log_entry_is_deep_copied_not_aliased():
     repo.append_audit_log(entry)
     entry["new_genome_ids"].append("mutated")
     assert repo.load_append_history() == [{"timestamp": "t1", "new_genome_ids": ["g2"]}]
+
+
+def test_config_roundtrip_and_missing_returns_none():
+    """工程审查问题1(2026-10-03 与用户确认): 算法参数应可持久化/加载,
+    供 --resume/--append 校验一致性。"""
+    repo = MemoryRepository()
+    assert repo.load_config() is None
+    repo.save_config({"cutoff_i": 0.5, "inflation": 1.5})
+    assert repo.load_config() == {"cutoff_i": 0.5, "inflation": 1.5}
+
+
+def test_config_save_is_deep_copied_not_aliased():
+    repo = MemoryRepository()
+    config = {"cutoff_i": 0.5}
+    repo.save_config(config)
+    config["cutoff_i"] = 0.9
+    assert repo.load_config()["cutoff_i"] == 0.5

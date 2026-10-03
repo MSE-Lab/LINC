@@ -19,10 +19,11 @@
   SSNBuilderStage/FamilyRefineStage 对合并后的完整数据全量重跑
   (不做增量优化, 保证正确性优先, 与用户确认一致)。
 """
+import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .core.entities import (
     CompleteSSN,
@@ -39,6 +40,8 @@ from .engine.intra_genome_stage import IntraGenomeStage
 from .engine.ssn_builder_stage import SSNBuilderStage
 from .ports.storage_port import RepositoryPort
 
+logger = logging.getLogger(__name__)
+
 
 class IndexMissingError(RuntimeError):
     """`--resume` 时发现历史 state 引用的比对索引已缺失(第二轮漏洞5,
@@ -50,6 +53,19 @@ class IndexMissingError(RuntimeError):
     `.linc_work/mmseqs_db`(或 diamond 对应目录)而 state 还在, 直接复用该
     handle 发起比对会在子进程层面崩溃、报错不友好, 因此在 `resume()` 中
     提前校验并抛出本异常, 由调用方(cli.py)给出清晰的修复指引。
+    """
+
+
+class ConfigMismatchError(RuntimeError):
+    """`--resume`/`--append` 时发现本次算法参数与历史运行不一致(工程审查
+    问题1, 2026-10-03 与用户确认)。
+
+    历史上 `resume()`/`append()` 会直接复用历史 state(用旧参数算出的
+    `intra_results`/`join_result` 等)并用本次(可能不同的)参数继续跑后续
+    Stage, 完全不报错, 产出新旧参数混搭的不一致结果。本异常在检测到参数
+    不一致且调用方未显式传入 `force=True` 时抛出, 列出全部不一致的字段
+    (历史值 vs 本次值), 要求用户确认后用 `--force` 显式覆盖继续, 或保持
+    参数一致/重新完整运行。
     """
 
 
@@ -126,6 +142,46 @@ class Pipeline:
                 "索引与 state 必须配套存在才能安全续跑, 请删除 -o 目录下的 "
                 ".linc_work 后重新执行一次完整的 `linc run`。"
             )
+
+    def _check_config_consistency(self, force: bool) -> None:
+        """校验本次算法参数(`self._config`)与历史持久化的参数是否一致
+        (工程审查问题1, 2026-10-03 与用户确认)。
+
+        历史 state 不存在 `config.pkl`(本次改动之前写入的旧版 state)时,
+        视为"无法校验", 只打印 warning 并放行(与 `input_signature` 旧格式
+        兼容处理的既有原则一致), 不阻断 resume/append。
+        """
+        historical_config = self._repository.load_config()
+        if historical_config is None:
+            logger.warning(
+                "历史 state 中未找到算法参数记录(config.pkl), 可能是本次改动"
+                "之前写入的旧版 state, 无法校验参数一致性, 已跳过该项校验。"
+            )
+            return
+        current_config = asdict(self._config)
+        mismatched = {
+            key: (historical_config.get(key), current_config[key])
+            for key in current_config
+            if historical_config.get(key) != current_config[key]
+        }
+        if not mismatched:
+            return
+        detail = "; ".join(
+            f"{key}: 历史={hist!r}, 本次={cur!r}"
+            for key, (hist, cur) in sorted(mismatched.items())
+        )
+        if force:
+            logger.warning(
+                "检测到算法参数与历史运行不一致, 但已指定 --force, 将继续执行"
+                "(可能产出新旧参数混搭的结果): %s", detail,
+            )
+            return
+        raise ConfigMismatchError(
+            f"--resume/--append 失败: 本次算法参数与历史运行不一致: {detail}; "
+            "直接续跑会产出新旧参数混搭的不一致结果。若确认要覆盖继续, 请加 "
+            "--force 显式确认(风险自负); 否则请保持参数与历史一致, 或删除 "
+            "-o 目录下的 .linc_work 后重新执行一次完整的 `linc run`。"
+        )
 
     @staticmethod
     def _loaded_only(genomes: Dict[str, Genome]) -> Dict[str, Genome]:
@@ -226,6 +282,9 @@ class Pipeline:
         self._repository.save_input_signature(
             build_input_signature(genome_files)
         )
+        # 工程审查问题1(2026-10-03 与用户确认): 持久化本次运行使用的全部
+        # 算法参数, 供后续 --resume/--append 校验一致性。
+        self._repository.save_config(asdict(self._config))
 
         genomes = GenomeLoadStage().run(genome_files)
         self._repository.save_genomes(genomes)
@@ -252,13 +311,19 @@ class Pipeline:
             families=families,
         )
 
-    def resume(self, genome_files: List[str]) -> PipelineResult:
+    def resume(self, genome_files: List[str], force: bool = False) -> PipelineResult:
         """从上次中断处接着跑完剩余 Stage(2026-10-02, 第8步)。
 
         要求 `genome_files` 与历史 `-i` 签名一致(由 cli.py 校验后调用本方法,
         本方法内部不再重复校验, 专注于"从哪个 Stage 接着跑")。
+
+        `force`: 若本次算法参数与历史持久化的参数不一致, 默认抛出
+        `ConfigMismatchError`; 传入 `force=True` 则仅记 warning 后继续执行
+        (工程审查问题1, 2026-10-03 与用户确认)。
         """
         repo = self._repository
+        self._check_config_consistency(force=force)
+        repo.save_config(asdict(self._config))
 
         if repo.has_genomes():
             genomes = repo.load_genomes()
@@ -301,7 +366,7 @@ class Pipeline:
             families=families,
         )
 
-    def append(self, new_genome_files: List[str]) -> PipelineResult:
+    def append(self, new_genome_files: List[str], force: bool = False) -> PipelineResult:
         """把 `new_genome_files` 追加到历史完整结果上(2026-10-02, 第8步)。
 
         要求历史状态是一次完整运行的结果(由 cli.py 在调用前校验 5 个 Stage
@@ -311,8 +376,14 @@ class Pipeline:
           并入历史全局库, cluster_id 从历史计数器接续);
         - SSNBuilderStage/FamilyRefineStage 对"历史+新增"合并后的完整数据
           全量重跑(不做增量优化, 保证正确性优先)。
+
+        `force`: 若本次算法参数与历史持久化的参数不一致, 默认抛出
+        `ConfigMismatchError`; 传入 `force=True` 则仅记 warning 后继续执行
+        (工程审查问题1, 2026-10-03 与用户确认)。
         """
         repo = self._repository
+        self._check_config_consistency(force=force)
+        repo.save_config(asdict(self._config))
 
         historical_genomes = repo.load_genomes()
         historical_intra = repo.load_intra_results()

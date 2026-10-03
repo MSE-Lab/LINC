@@ -30,6 +30,7 @@ class MemoryRepository:
         self._has_families = False
         self._input_signature: Optional[List[Any]] = None
         self._append_history: List[Dict[str, Any]] = []
+        self._config: Optional[Dict[str, Any]] = None
 
     def save_genomes(self, genomes: Dict[str, Genome]) -> None:
         self._genomes = copy.deepcopy(genomes)
@@ -92,3 +93,9 @@ class MemoryRepository:
 
     def load_append_history(self) -> List[Dict[str, Any]]:
         return copy.deepcopy(self._append_history)
+
+    def save_config(self, config: Dict[str, Any]) -> None:
+        self._config = copy.deepcopy(config)
+
+    def load_config(self) -> Optional[Dict[str, Any]]:
+        return copy.deepcopy(self._config) if self._config is not None else None

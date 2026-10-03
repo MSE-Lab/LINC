@@ -186,3 +186,15 @@ def test_append_audit_log_is_human_readable_json_lines(tmp_path):
     assert len(lines) == 2
     import json
     assert json.loads(lines[0]) == {"timestamp": "t1", "new_genome_ids": ["g2"]}
+
+
+def test_config_roundtrip_across_instances(tmp_path):
+    """工程审查问题1(2026-10-03 与用户确认): 算法参数应可持久化并跨进程
+    加载, 供 --resume/--append 校验一致性。"""
+    state_dir = str(tmp_path / "state")
+    repo1 = FileRepository(state_dir)
+    assert repo1.load_config() is None
+    repo1.save_config({"cutoff_i": 0.5, "inflation": 1.5})
+
+    repo2 = FileRepository(state_dir)
+    assert repo2.load_config() == {"cutoff_i": 0.5, "inflation": 1.5}

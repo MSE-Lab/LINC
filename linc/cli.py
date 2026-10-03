@@ -44,7 +44,7 @@ from .engine.genome_load_stage import (
     discover_fasta_files,
 )
 from .adapters.storage.file_repo import FileRepository, StateCorruptedError
-from .pipeline import IndexMissingError, Pipeline, PipelineConfig
+from .pipeline import ConfigMismatchError, IndexMissingError, Pipeline, PipelineConfig
 
 app = typer.Typer(help="LINC: 增量基因组比较构建 SSN 并通过 MCL 细分蛋白质家族。")
 
@@ -293,6 +293,13 @@ def run(
              "索引目录/state pkl 不受影响, 始终保留。设为 True 保留全部中间"
              "产物以便调试。",
     ),
+    force: bool = typer.Option(
+        False, "--force",
+        help="仅 --resume/-a/--append 生效: 本次算法参数(cutoff_i/ii/c、"
+             "inflation 等)与历史运行不一致时, 默认报错退出(工程审查问题1, "
+             "2026-10-03); 设为 True 则仅打印 warning 后继续执行(可能产出"
+             "新旧参数混搭的不一致结果, 风险自负)。",
+    ),
     verbose: bool = typer.Option(False, "--verbose", help="输出 DEBUG 级别日志。"),
 ) -> None:
     """运行 LINC 流水线(当前阶段已接通 GenomeLoadStage + IntraGenomeStage +
@@ -482,17 +489,17 @@ def run(
                 "追加模式(--append): 发现 %d 个新基因组候选文件(目录=%s)",
                 len(new_genome_files), append_dir,
             )
-            result = pipeline.append(new_genome_files)
+            result = pipeline.append(new_genome_files, force=force)
         elif resume:
             logger.info("断点续跑(--resume): 共 %d 个候选文件", len(genome_files))
-            result = pipeline.resume(genome_files)
+            result = pipeline.resume(genome_files, force=force)
         else:
             logger.info("开始加载基因组, 共发现 %d 个候选文件", len(genome_files))
             result = pipeline.run(genome_files)
     except GenomeIdConflictError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
-    except (StateCorruptedError, IndexMissingError) as exc:
+    except (StateCorruptedError, IndexMissingError, ConfigMismatchError) as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
