@@ -146,6 +146,9 @@ class Pipeline:
             aligner=self._aligner,
             edge_completion_mode=config.edge_completion_mode,
             mega_cluster_warning_threshold=config.mega_cluster_warning_threshold,
+            cutoff_i=config.cutoff_i,
+            cutoff_c=config.cutoff_c,
+            cov_mode=config.cov_mode,
         )
         return ssn_stage.run(loaded_genomes, intra_results, join_result)
 

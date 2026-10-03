@@ -28,11 +28,18 @@
        warning), 不做自动降级或拆分 —— 与用户确认(2026-10-02): 任何跳过
        真实比对的"降级"或"拆分"都会让结果偏离"全对全比对"的最初设计目标,
        产出有损/近似的 SSN, 这个决定权应交还给用户, 而不是由程序自作主张。
+    4. 纳入判据一致性(2026-10-03 与用户确认, 修复第二轮漏洞2): 本阶段补边
+       时无论是复用 `pairwise_hits`(代表-成员/成员-成员/同基因组跨局部簇)
+       还是跨基因组新发起比对的结果, 都必须统一调用
+       `passes_inclusion_cutoff(hit, cutoff_i, cutoff_c, cov_mode)` 过滤,
+       与 IntraGenomeStage/GlobalJoinStage 的判据口径保持一致, 避免混入
+       identity < cutoff_i 的弱边改变 MCL 细分阶段看到的权重分布。
 """
 import logging
 from typing import Dict, List, Optional, Set
 
 from ..core.entities import (
+    COV_MODE_BIDIRECTIONAL,
     EDGE_COMPLETION_FULL,
     EDGE_COMPLETION_NONE,
     EDGE_COMPLETION_REPRESENTATIVE_MEMBER,
@@ -43,6 +50,7 @@ from ..core.entities import (
     GenomeIntraResult,
     IncrementalResult,
     SSNEdge,
+    passes_inclusion_cutoff,
 )
 from ..core.events import DomainEvent, EventBus
 from ..ports.aligner_port import AlignerPort
@@ -59,11 +67,21 @@ class SSNBuilderStage:
         edge_completion_mode: str = EDGE_COMPLETION_REPRESENTATIVE_MEMBER,
         mega_cluster_warning_threshold: Optional[int] = None,
         event_bus: Optional[EventBus] = None,
+        cutoff_i: float = 0.5,
+        cutoff_c: float = 0.0,
+        cov_mode: int = COV_MODE_BIDIRECTIONAL,
     ) -> None:
         self._aligner = aligner
         self._edge_completion_mode = edge_completion_mode
         self._mega_cluster_warning_threshold = mega_cluster_warning_threshold
         self._event_bus = event_bus
+        # 与用户确认修复第二轮漏洞2(2026-10-03): 补边阶段复用/新发起比对产生
+        # 的边, 必须与 IntraGenomeStage/GlobalJoinStage 一样统一走
+        # passes_inclusion_cutoff() 判定, 保持 SSN 边纳入判据前后一致,
+        # 避免混入 identity < cutoff_i 的弱边改变 MCL 看到的权重分布。
+        self._cutoff_i = cutoff_i
+        self._cutoff_c = cutoff_c
+        self._cov_mode = cov_mode
 
     def run(
         self,
@@ -100,8 +118,8 @@ class SSNBuilderStage:
         logger.info("SSNBuilderStage 完成(full模式): 共 %d 条边", len(edges))
         return CompleteSSN(edges=edges, edge_completion_mode=self._edge_completion_mode)
 
-    @staticmethod
     def _add_known_intra_genome_edges(
+        self,
         intra_results: Dict[str, GenomeIntraResult],
         edges: Set[SSNEdge],
         include_member_member: bool,
@@ -113,6 +131,12 @@ class SSNBuilderStage:
         全部基因已经做过全对全比对, 同一基因组内任意两个基因之间的
         identity/coverage/bitscore 在 intra 阶段就已经算出, 补边阶段应直接
         复用, 而不是重新发起比对。
+
+        纳入判据修复(2026-10-03, 与用户确认, 第二轮漏洞2): 复用的 hit 来自
+        `pairwise_hits`, 其中包含 IntraGenomeStage 全对全比对的全部原始
+        结果(不限于通过 cutoff 的), 补边前必须同样调用
+        `passes_inclusion_cutoff()` 过滤, 否则会混入 identity < cutoff_i
+        的弱边, 与稀疏SSN(GlobalJoinStage)的判据口径不一致。
         """
         for intra in intra_results.values():
             pair_lookup: Dict[frozenset, AlignmentResult] = {}
@@ -128,7 +152,9 @@ class SSNBuilderStage:
                 for rep_id in representatives:
                     for member_id in plain_members:
                         hit = pair_lookup.get(frozenset((rep_id, member_id)))
-                        if hit is not None:
+                        if hit is not None and passes_inclusion_cutoff(
+                            hit, self._cutoff_i, self._cutoff_c, self._cov_mode
+                        ):
                             source_length, target_length = SSNBuilderStage._lengths_for(
                                 hit, rep_id
                             )
@@ -144,7 +170,9 @@ class SSNBuilderStage:
                     for i, gene_a in enumerate(members):
                         for gene_b in members[i + 1:]:
                             hit = pair_lookup.get(frozenset((gene_a, gene_b)))
-                            if hit is not None:
+                            if hit is not None and passes_inclusion_cutoff(
+                                hit, self._cutoff_i, self._cutoff_c, self._cov_mode
+                            ):
                                 source_length, target_length = SSNBuilderStage._lengths_for(
                                     hit, gene_a
                                 )
@@ -250,6 +278,10 @@ class SSNBuilderStage:
                         hit = pair_lookup.get(frozenset((gene_a, gene_b)))
                         if hit is None:
                             continue
+                        if not passes_inclusion_cutoff(
+                            hit, self._cutoff_i, self._cutoff_c, self._cov_mode
+                        ):
+                            continue
                         source_length, target_length = self._lengths_for(hit, gene_a)
                         edges.add(SSNEdge(
                             source=gene_a, target=gene_b,
@@ -310,6 +342,13 @@ class SSNBuilderStage:
                 # search 的 target 是整个基因组b的索引, 可能命中该基因组对下
                 # 分属不同簇的无关基因, 只保留双方属于同一个簇的结果。
                 if gene_cluster_map.get(hit.query_id) != gene_cluster_map.get(hit.subject_id):
+                    continue
+                # 纳入判据修复(2026-10-03, 与用户确认, 第二轮漏洞2): 新发起
+                # 的跨基因组比对结果同样需要统一走 passes_inclusion_cutoff()
+                # 过滤, 保持与 GlobalJoinStage/IntraGenomeStage 一致的判据。
+                if not passes_inclusion_cutoff(
+                    hit, self._cutoff_i, self._cutoff_c, self._cov_mode
+                ):
                     continue
                 edges.add(SSNEdge(
                     source=hit.query_id, target=hit.subject_id,

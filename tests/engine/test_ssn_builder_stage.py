@@ -433,6 +433,82 @@ def test_inactive_global_clusters_are_skipped():
     assert frozenset(("A|2", "A|3")) in actual_pairs
 
 
+def test_representative_member_mode_filters_weak_reused_edges():
+    """第二轮漏洞2回归测试: representative_member 模式下复用
+    `pairwise_hits` 补代表-成员边时, 若某条 hit 的 identity 低于 cutoff_i,
+    不应被补成边(与 GlobalJoinStage 统一走 passes_inclusion_cutoff() 的
+    判据口径保持一致)。
+    """
+    genomes, intra_results, incremental_result = _build_two_genome_fixture()
+    # 人为把 A|1-A|3 的 hit 改成低于默认 cutoff_i=0.5 的弱边
+    intra_results["A"].pairwise_hits = [
+        _hit("A|1", "A|2", identity=0.9, coverage=0.9),
+        _hit("A|1", "A|3", identity=0.2, coverage=0.9),
+        _hit("A|2", "A|3", identity=0.9, coverage=0.9),
+    ]
+
+    stage = SSNBuilderStage(
+        aligner=MockAligner(), edge_completion_mode="representative_member",
+        cutoff_i=0.5, cutoff_c=0.0,
+    )
+    result = stage.run(genomes, intra_results, incremental_result)
+
+    actual_pairs = {frozenset((e.source, e.target)) for e in result.edges}
+    assert frozenset(("A|1", "A|2")) in actual_pairs
+    # 弱边(identity=0.2 < cutoff_i=0.5)不应被补边
+    assert frozenset(("A|1", "A|3")) not in actual_pairs
+
+
+def test_full_mode_filters_weak_member_member_reused_edges():
+    """第二轮漏洞2回归测试: full 模式下成员-成员复用边同样需要过滤弱边。"""
+    genomes, intra_results, incremental_result = _build_two_genome_fixture()
+    intra_results["A"].pairwise_hits = [
+        _hit("A|1", "A|2", identity=0.9, coverage=0.9),
+        _hit("A|1", "A|3", identity=0.9, coverage=0.9),
+        _hit("A|2", "A|3", identity=0.1, coverage=0.9),  # 弱边
+    ]
+    intra_results["B"].pairwise_hits = [
+        _hit("B|1", "B|2", identity=0.9, coverage=0.9),
+        _hit("B|1", "B|3", identity=0.9, coverage=0.9),
+        _hit("B|2", "B|3", identity=0.9, coverage=0.9),
+    ]
+
+    stage = SSNBuilderStage(
+        aligner=MockAligner(), edge_completion_mode="full",
+        cutoff_i=0.5, cutoff_c=0.0,
+    )
+    result = stage.run(genomes, intra_results, incremental_result)
+
+    actual_pairs = {frozenset((e.source, e.target)) for e in result.edges}
+    assert frozenset(("A|1", "A|3")) in actual_pairs
+    assert frozenset(("A|2", "A|3")) not in actual_pairs   # 弱边被过滤
+
+
+def test_full_mode_filters_weak_cross_genome_new_search_edges():
+    """第二轮漏洞2回归测试: full 模式下跨基因组新发起比对产生的边同样需要
+    过滤弱边, 不能只按 evalue(mmseqs 搜索命中阈值)就纳入 SSN。
+
+    注意: `_build_two_genome_fixture()` 的 `incremental_result.ssn_edges`
+    里已预置了一条 A|1-B|1 的稀疏边(视为 GlobalJoinStage 已经按
+    passes_inclusion_cutoff() 判定通过的既有结果, SSNBuilderStage 不应/
+    不会重新过滤它), 因此本测试改用簇内另外两个此前未连接的成员
+    (A|3 / B|2)来验证"新发起比对"路径的过滤行为, 避免与预置边混淆。
+    """
+    genomes, intra_results, incremental_result = _build_two_genome_fixture()
+    aligner = MockAligner()
+    # A|3 与 B|2 之间人为设一条低 identity 的弱命中(模拟 search 返回了低于
+    # cutoff_i 的命中, 真实场景里 mmseqs evalue 过滤会比 identity 更宽松)
+    aligner.set_result("A|3", "B|2", _hit("A|3", "B|2", identity=0.1, coverage=0.9))
+    aligner.set_result("A|3", "B|3", _hit("A|3", "B|3", identity=0.9, coverage=0.9))
+
+    stage = SSNBuilderStage(aligner=aligner, edge_completion_mode="full", cutoff_i=0.5, cutoff_c=0.0)
+    result = stage.run(genomes, intra_results, incremental_result)
+
+    actual_pairs = {frozenset((e.source, e.target)) for e in result.edges}
+    assert frozenset(("A|3", "B|3")) in actual_pairs
+    assert frozenset(("A|3", "B|2")) not in actual_pairs
+
+
 def test_full_mode_fills_same_genome_cross_local_cluster_gap(monkeypatch):
     """第二轮漏洞1回归测试: 同一基因组、不同局部簇、但被全局合并进同一个
     全局簇的两个基因, 其 SSN 边应被补齐(直接复用已有 pairwise_hits, 不
