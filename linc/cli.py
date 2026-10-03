@@ -47,12 +47,12 @@ from .adapters.storage.file_repo import FileRepository, StateCorruptedError
 from .pipeline import ConfigMismatchError, IndexMissingError, Pipeline, PipelineConfig
 from .utils.lock import PipelineLockedError, acquire_pipeline_lock
 
-app = typer.Typer(help="LINC: 增量基因组比较构建 SSN 并通过 MCL 细分蛋白质家族。")
+app = typer.Typer(help="LINC: incremental genome comparison that builds a sequence similarity network (SSN) and refines protein families via MCL.")
 
 
 @app.callback()
 def main() -> None:
-    """LINC 命令行工具。"""
+    """LINC command-line tool."""
     pass
 
 
@@ -234,107 +234,94 @@ def _build_intra_summary(intra_results: dict) -> dict:
 def run(
     input_dir: str = typer.Option(
         ..., "-i", "--input-dir",
-        help="包含基因组 FASTA 文件(*.fasta/*.fa/*.faa)的目录。表示历史(首次)"
-             "运行的输入集合; --resume/--append 时必须与历史记录一致"
-             "(按文件名比对), 不可变化。",
+        help="Directory of input genome FASTA files (*.fasta/*.fa/*.faa). "
+             "Must match the original input set (by file name) on --resume/--append.",
     ),
     output_dir: str = typer.Option(
-        "output", "-o", "--output-dir", help="输出目录,用于写入运行摘要等结果文件。"
+        "output", "-o", "--output-dir", help="Output directory for result and summary files."
     ),
     append_dir: Optional[str] = typer.Option(
         None, "-a", "--append",
-        help="追加模式: 指定一个包含新基因组 FASTA 文件的目录, 将其追加到"
-             "-o 指向的历史完整结果上(要求 -o 下已存在一次完整运行的结果)。"
-             "可多次追加(每次 -a 指向不同的新目录)。-i 仍须传入且必须与历史"
-             "一致, 不与 --resume 共用。",
+        help="Append mode: directory of new genome FASTA files to add to the "
+             "existing results in -o. Can be used multiple times. Requires -i "
+             "to still match the original input set; mutually exclusive with --resume.",
     ),
     resume: bool = typer.Option(
         False, "--resume",
-        help="断点续跑: 从 -o 历史中断的 Stage 接着跑完剩余步骤, -i 必须与"
-             "历史一致, 不得同时传入 -a。",
+        help="Resume an interrupted run from -o, continuing from the last "
+             "completed stage. Mutually exclusive with --append.",
     ),
     cutoff_i: float = typer.Option(
-        0.5, "--cutoff-i", help="Cutoff-I(纳入阈值): 判定是否成簇。"
+        0.5, "--cutoff-i", help="Cutoff-I: inclusion threshold for clustering."
     ),
     cutoff_ii: float = typer.Option(
-        0.8, "--cutoff-ii", help="Cutoff-II(高置信阈值): 判定代表选取策略。"
+        0.8, "--cutoff-ii", help="Cutoff-II: high-confidence threshold for representative selection."
     ),
     cutoff_c: float = typer.Option(
-        0.5, "--cutoff-c", help="Cutoff-C(覆盖度纳入阈值): 与 --cutoff-i 共同判定是否成簇, "
-             "同时也与 --cutoff-ii 共同判定高置信代表选取/并入决策(第二轮漏洞3修复, "
-             "2026-10-03); 默认 0.5。设为 0.0 等价于不启用覆盖度过滤(回退为旧行为)。"
+        0.5, "--cutoff-c", help="Cutoff-C: coverage threshold used together with --cutoff-i/--cutoff-ii "
+             "for clustering and representative decisions. Set to 0.0 to disable coverage filtering."
     ),
     cov_mode: int = typer.Option(
         0, "--cov-mode",
-        help="覆盖度合成方式(参考 mmseqs2 --cov-mode): "
-             "0=双向(取 query/subject 覆盖度较小者, 默认) | "
-             "1=仅看 subject 覆盖度 | 2=仅看 query 覆盖度。",
+        help="Coverage mode (as in mmseqs2 --cov-mode): "
+             "0=min of query/subject coverage (default), 1=subject only, 2=query only.",
     ),
     max_per_cluster: int = typer.Option(
-        5, "--max-per-cluster", help="单个局部簇最多选取的代表数。"
+        5, "--max-per-cluster", help="Maximum number of representatives per local cluster."
     ),
     aligner_backend: str = typer.Option(
         "mmseqs", "--aligner",
-        help="比对引擎后端: mmseqs(默认, 真实比对, 需已安装 mmseqs2) | "
-             "diamond(真实比对, 需已安装 diamond)。",
+        help="Alignment backend: mmseqs (default, requires mmseqs2 installed) "
+             "or diamond (requires diamond installed).",
     ),
     threads: int = typer.Option(
         0, "--threads",
-        help="mmseqs/diamond 使用的线程数(仅 --aligner mmseqs|diamond 生效)。"
-             "0 = 不显式指定, 让工具使用其自身默认的全部核心数(注意: 多线程并行"
-             "时结果在极少数边界情况下不保证严格可复现, 如需完全可复现结果请"
-             "指定 --threads 1)。",
+        help="Number of threads for mmseqs/diamond. 0 lets the tool use its own default "
+             "(all cores).",
     ),
     edge_completion_mode: str = typer.Option(
         "representative_member", "--edge-completion-mode",
-        help="SSN 补边模式: none(不补边, 仅保留代表-代表边) | "
-             "representative_member(默认, 补代表-成员边, 复用已有比对结果,"
-             "零新增比对开销) | full(簇内全量补边, 同基因组内部分依旧免费复用,"
-             "仅跨基因组成员对会真正发起新比对, 大规模簇可能耗时较长)。",
+        help="SSN edge completion strategy: none (representative-representative edges only), "
+             "representative_member (default, adds representative-member edges at no extra "
+             "alignment cost), or full (adds all member-member edges within a cluster; "
+             "cross-genome pairs require new alignments and can be slow for large clusters).",
     ),
     mega_cluster_warning_threshold: Optional[int] = typer.Option(
         None, "--mega-cluster-warning-threshold",
-        help="仅 --edge-completion-mode full 生效: 当某个簇的跨基因组待比对"
-             "成员对数量超过该阈值时, 记录 warning 提醒(不会自动降级或拆分,"
-             "流程照常完整执行)。默认不设阈值, 不做任何提醒。",
+        help="With --edge-completion-mode full, log a warning when a cluster's number of "
+             "cross-genome pairs exceeds this threshold. Unset by default (no warning).",
     ),
     inflation: float = typer.Option(
         1.5, "--inflation",
-        help="MCL(Markov Clustering)膨胀参数, 控制亚家族细分的精细程度: "
-             "值越低聚类越粗(更多基因归入同一家族), 值越高聚类越细。需要已"
-             "安装系统级 mcl(推荐: conda install -c bioconda mcl)。",
+        help="MCL inflation parameter controlling sub-family granularity: lower values yield "
+             "coarser clusters, higher values yield finer ones. Requires mcl to be installed.",
     ),
     edge_weight_mode: str = typer.Option(
         "identity_x_coverage", "--edge-weight-mode",
-        help="喂给 MCL 的边权重计算方式: identity | coverage | "
-             "identity_x_coverage(默认, identity*coverage) | "
-             "identity_coverage_weighted(alpha*identity+(1-alpha)*coverage,"
-             "配合 --edge-weight-alpha) | bitscore(原始值, 不做归一化)。",
+        help="Edge weight used by MCL: identity | coverage | "
+             "identity_x_coverage (default, identity*coverage) | "
+             "identity_coverage_weighted (alpha*identity + (1-alpha)*coverage, "
+             "see --edge-weight-alpha) | bitscore (raw, unnormalized).",
     ),
     edge_weight_alpha: float = typer.Option(
         0.5, "--edge-weight-alpha",
-        help="仅 --edge-weight-mode identity_coverage_weighted 生效: "
-             "identity 的权重系数, coverage 权重为 (1-alpha), 范围 [0, 1]。",
+        help="Weight of identity when --edge-weight-mode identity_coverage_weighted is used "
+             "(coverage weight is 1-alpha); range [0, 1].",
     ),
     keep_intermediate: bool = typer.Option(
         False, "--keep-intermediate",
-        help="默认(False)下各 Stage 用完 search()/mcl 产生的中间文件即删"
-             "(如 search_join/search_full_to_*/component_*), 避免 "
-             ".linc_work 无限累积(数据管理优化第3项, 2026-10-03); "
-             "索引目录/state pkl 不受影响, 始终保留。设为 True 保留全部中间"
-             "产物以便调试。",
+        help="Keep intermediate alignment/clustering files instead of deleting them after use. "
+             "Index and state files are always kept regardless of this flag.",
     ),
     force: bool = typer.Option(
         False, "--force",
-        help="仅 --resume/-a/--append 生效: 本次算法参数(cutoff_i/ii/c、"
-             "inflation 等)与历史运行不一致时, 默认报错退出(工程审查问题1, "
-             "2026-10-03); 设为 True 则仅打印 warning 后继续执行(可能产出"
-             "新旧参数混搭的不一致结果, 风险自负)。",
+        help="With --resume/--append, continue (with a warning) even if algorithm parameters "
+             "differ from the historical run, instead of raising an error.",
     ),
-    verbose: bool = typer.Option(False, "--verbose", help="输出 DEBUG 级别日志。"),
+    verbose: bool = typer.Option(False, "--verbose", help="Enable DEBUG-level logging."),
 ) -> None:
-    """运行 LINC 流水线(当前阶段已接通 GenomeLoadStage + IntraGenomeStage +
-    GlobalJoinStage + SSNBuilderStage + FamilyRefineStage)。"""
+    """Run the LINC pipeline (GenomeLoadStage -> IntraGenomeStage -> GlobalJoinStage ->
+    SSNBuilderStage -> FamilyRefineStage)."""
     _setup_logging(verbose)
 
     if not os.path.isdir(input_dir):
