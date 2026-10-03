@@ -20,7 +20,7 @@ import gzip
 import logging
 import os
 import pickle
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from ...core.entities import CompleteSSN, Genome, GenomeIntraResult, IncrementalResult, OrthologFamily
 
@@ -149,8 +149,11 @@ class FileRepository:
         return self._exists("families")
 
     # ---- -i 输入签名(供 --resume/--append 校验一致性) ----
-    def save_input_signature(self, file_names: List[str]) -> None:
-        self._save("input_signature", list(file_names))
+    # 签名元素类型为 `(basename, size, mtime)` 三元组(2026-10-03 起, 第二轮
+    # 漏洞"签名只比 basename"修复); 历史遗留数据可能仍是纯 basename 字符串,
+    # 读取时原样返回, 由调用方(cli.py)识别格式并做兼容处理。
+    def save_input_signature(self, signature: List[Any]) -> None:
+        self._save("input_signature", list(signature))
 
-    def load_input_signature(self) -> Optional[List[str]]:
+    def load_input_signature(self) -> Optional[List[Any]]:
         return self._load("input_signature")

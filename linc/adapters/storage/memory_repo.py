@@ -9,7 +9,7 @@
 逐一对应(而非早期版本里粗粒度的 checkpoint/global_library/ssn_edges)。
 """
 import copy
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from ...core.entities import CompleteSSN, Genome, GenomeIntraResult, IncrementalResult, OrthologFamily
 
@@ -28,7 +28,7 @@ class MemoryRepository:
         self._has_join_result = False
         self._has_complete_ssn = False
         self._has_families = False
-        self._input_signature: Optional[List[str]] = None
+        self._input_signature: Optional[List[Any]] = None
 
     def save_genomes(self, genomes: Dict[str, Genome]) -> None:
         self._genomes = copy.deepcopy(genomes)
@@ -80,8 +80,8 @@ class MemoryRepository:
     def has_families(self) -> bool:
         return self._has_families
 
-    def save_input_signature(self, file_names: List[str]) -> None:
-        self._input_signature = list(file_names)
+    def save_input_signature(self, signature: List[Any]) -> None:
+        self._input_signature = list(signature)
 
-    def load_input_signature(self) -> Optional[List[str]]:
+    def load_input_signature(self) -> Optional[List[Any]]:
         return list(self._input_signature) if self._input_signature is not None else None

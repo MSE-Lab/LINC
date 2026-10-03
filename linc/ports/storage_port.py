@@ -12,14 +12,17 @@ state/` 下(与现有 `.linc_work/mmseqs_db` 等索引目录风格一致)。为�
 - `has_*()` 系列: 精确判断某个 Stage 的产出是否已被持久化保存过(不能仅靠
   `load_*()` 返回空集合/None 来判断, 因为空结果本身也可能是合法产出);
 - `save_input_signature`/`load_input_signature`: 保存/加载本次(或历史)
-  `-i` 参数对应目录下 discover 出的基因组文件名集合, 供 `--resume`/
-  `--append` 校验 `-i` 是否与历史一致(按文件名集合比较, 而非路径字符串,
-  更鲁棒)。
+  `-i` 参数对应目录下 discover 出的基因组文件签名列表, 供 `--resume`/
+  `--append` 校验 `-i` 是否与历史一致。签名元素为 `(basename, size, mtime)`
+  三元组(2026-10-03 起, 第二轮漏洞"签名只比 basename"修复, 与用户权衡性能后
+  采用 大小+mtime 而非完整内容 MD5 的折中方案), 能拦住"同名但内容已变"的
+  误用场景; 历史遗留数据可能仍是纯 basename 字符串列表, 读取时原样返回,
+  由调用方(cli.py)识别格式并做兼容处理。
 
 具体实现见 adapters/storage/memory_repo.py(纯内存, 不支持跨进程恢复)与
 adapters/storage/file_repo.py(基于 pickle 文件, 支持跨进程 resume/append)。
 """
-from typing import Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 from ..core.entities import CompleteSSN, Genome, GenomeIntraResult, IncrementalResult, OrthologFamily
 
@@ -88,10 +91,10 @@ class RepositoryPort(Protocol):
         """FamilyRefineStage 产出是否已被保存过。"""
         ...
 
-    def save_input_signature(self, file_names: List[str]) -> None:
-        """保存 `-i` 对应目录 discover 出的基因组文件名集合(已排序)。"""
+    def save_input_signature(self, signature: List[Any]) -> None:
+        """保存 `-i` 对应目录 discover 出的基因组文件签名列表(已按 basename 排序)。"""
         ...
 
-    def load_input_signature(self) -> Optional[List[str]]:
-        """加载历史保存的 `-i` 文件名集合, 不存在则返回 None。"""
+    def load_input_signature(self) -> Optional[List[Any]]:
+        """加载历史保存的 `-i` 文件签名列表, 不存在则返回 None。"""
         ...

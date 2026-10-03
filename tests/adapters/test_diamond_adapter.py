@@ -411,6 +411,7 @@ def test_cleanup_search_removes_tagged_subdir_but_not_index(monkeypatch, tmp_pat
 
     aligner = DiamondAligner(DiamondConfig(work_dir=_tmp_work_dir(tmp_path)))
     persisted_index = os.path.join(str(tmp_path), "persisted", "db")
+    os.makedirs(os.path.dirname(persisted_index), exist_ok=True)
     with open(f"{persisted_index}.dmnd", "w", encoding="utf-8") as fh:
         fh.write("fake db")
 

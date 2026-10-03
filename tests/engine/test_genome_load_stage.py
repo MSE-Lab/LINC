@@ -7,6 +7,7 @@ from linc.core.entities import GenomeStatus
 from linc.engine.genome_load_stage import (
     GenomeIdConflictError,
     GenomeLoadStage,
+    build_input_signature,
     discover_fasta_files,
 )
 
@@ -230,3 +231,31 @@ def test_file_with_only_empty_records_marks_failed(tmp_path):
 
     assert genome.status == GenomeStatus.FAILED
     assert genome.genes == []
+
+
+def test_build_input_signature_returns_sorted_basename_size_mtime_tuples(tmp_path):
+    # 签名元素为 (basename, size, mtime) 三元组, 按 basename 排序
+    # (2026-10-03, 第二轮漏洞"签名只比 basename"修复)。
+    path_b = tmp_path / "b.faa"
+    path_a = tmp_path / "a.faa"
+    path_b.write_text(">x\nMK\n", encoding="utf-8")
+    path_a.write_text(">x\nMKV\n", encoding="utf-8")
+
+    signature = build_input_signature([str(path_b), str(path_a)])
+
+    assert [item[0] for item in signature] == ["a.faa", "b.faa"]
+    assert all(len(item) == 3 for item in signature)
+
+
+def test_build_input_signature_changes_when_file_content_and_size_change(tmp_path):
+    # 内容被替换且大小发生变化时, 签名应跟着变化(能拦住该误用场景, 与
+    # 仅比 basename 的旧逻辑形成对比)。
+    path = tmp_path / "genome01.faa"
+    path.write_text(">x\nMK\n", encoding="utf-8")
+    sig_before = build_input_signature([str(path)])
+
+    path.write_text(">x\nMKVLSTRAYQWERTY\n", encoding="utf-8")
+    sig_after = build_input_signature([str(path)])
+
+    assert sig_before != sig_after
+    assert sig_before[0][0] == sig_after[0][0] == "genome01.faa"

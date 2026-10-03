@@ -150,6 +150,9 @@ def test_edge_weight_mode_is_passed_through_to_graph_weight():
                 captured_weights[frozenset((u, v))] = data["weight"]
             return [set(graph.nodes)]
 
+        def cleanup(self, index_id=None) -> None:
+            pass
+
     complete_ssn = CompleteSSN(edges={_edge("A", "B", identity=0.5, coverage=0.5, bitscore=999.0)})
     stage = FamilyRefineStage(clustering=_CaptureWeights(), edge_weight_mode="bitscore")
 

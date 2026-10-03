@@ -57,6 +57,25 @@ def discover_fasta_files(directory: str) -> List[str]:
     return sorted(set(paths))
 
 
+def build_input_signature(file_paths: List[str]) -> List[Tuple[str, int, float]]:
+    """构造 `-i` 输入文件集合的签名, 用于 `--resume`/`-a` 的一致性校验。
+
+    签名内容为 `(basename, size, mtime)` 三元组列表(按 basename 排序),
+    而不是单纯的 basename 集合(2026-10-03, 第二轮漏洞"签名只比 basename"
+    修复)。选用 "文件大小+mtime" 而非完整内容 hash(如 MD5), 是与用户
+    权衡性能后的折中方案: `os.stat` 几乎零开销, 能拦住"同名但内容已被
+    替换"的绝大多数真实误用场景(文件大小或 mtime 通常会随内容变化而变),
+    但不保证能拦住"刻意伪造相同大小+相同mtime"的极端场景——这类场景
+    需要用户蓄意构造, 现实中概率极低, 为此引入全文件 MD5 校验的运行时
+    开销(resume/append 每次启动都要重新读一遍所有历史文件内容)并不划算。
+    """
+    signature: List[Tuple[str, int, float]] = []
+    for file_path in file_paths:
+        stat = os.stat(file_path)
+        signature.append((os.path.basename(file_path), stat.st_size, stat.st_mtime))
+    return sorted(signature, key=lambda item: item[0])
+
+
 def _parse_fasta(file_path: str) -> Iterator[Tuple[str, str]]:
     """极简 FASTA 解析器,逐条产出 (header, sequence)。
 

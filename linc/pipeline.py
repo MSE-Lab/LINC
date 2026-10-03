@@ -32,7 +32,7 @@ from .core.entities import (
     OrthologFamily,
 )
 from .engine.family_refine_stage import FamilyRefineStage
-from .engine.genome_load_stage import GenomeLoadStage
+from .engine.genome_load_stage import GenomeLoadStage, build_input_signature
 from .engine.global_join_stage import GlobalJoinStage
 from .engine.intra_genome_stage import IntraGenomeStage
 from .engine.ssn_builder_stage import SSNBuilderStage
@@ -222,7 +222,7 @@ class Pipeline:
     def run(self, genome_files: List[str]) -> PipelineResult:
         """首次完整运行(无历史状态), 依次跑完 5 个 Stage 并逐一持久化。"""
         self._repository.save_input_signature(
-            sorted(os.path.basename(f) for f in genome_files)
+            build_input_signature(genome_files)
         )
 
         genomes = GenomeLoadStage().run(genome_files)

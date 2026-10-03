@@ -534,6 +534,52 @@ def test_run_resume_with_mismatched_input_dir_exits_with_error(tmp_path):
     assert "历史" in result.stdout or "历史" in (result.stderr or "")
 
 
+def test_run_resume_with_same_filename_but_changed_content_exits_with_error(tmp_path):
+    # 第二轮漏洞"resume/append 签名只比 basename"修复(2026-10-03, 与用户
+    # 权衡性能后采用 大小+mtime 而非完整内容 MD5): 文件名不变, 但内容(进而
+    # 大小)被替换, 应被新签名拦住, 而不是像旧逻辑(仅比 basename)那样静默通过。
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    fasta_path = input_dir / "genome01.faa"
+    _write_fasta(str(fasta_path), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    first = runner.invoke(app, ["run", "-i", str(input_dir), "-o", str(output_dir)])
+    assert first.exit_code == 0
+
+    # 同名文件, 内容被替换(序列变长, 文件大小随之变化)。
+    _write_fasta(str(fasta_path), [("g1", "MKVLSTRAYQWERTYUIOPASDFGHJKLZXCVBNM")])
+
+    result = runner.invoke(
+        app, ["run", "-i", str(input_dir), "-o", str(output_dir), "--resume"],
+    )
+    assert result.exit_code != 0
+    assert "历史" in result.stdout or "历史" in (result.stderr or "")
+
+
+def test_run_resume_with_legacy_basename_only_signature_still_works(tmp_path):
+    # 兼容历史遗留的旧版签名格式(纯 basename 字符串列表, 2026-10-03之前写入):
+    # 文件集合未变时应正常 resume 成功, 只是校验精度退化为仅比对文件名。
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV"), ("g2", "MKL")])
+    output_dir = tmp_path / "out"
+
+    first = runner.invoke(app, ["run", "-i", str(input_dir), "-o", str(output_dir)])
+    assert first.exit_code == 0
+
+    # 手动把已持久化的签名改写为旧版格式(纯 basename 字符串列表)。
+    from linc.adapters.storage.file_repo import FileRepository
+    state_dir = os.path.join(str(output_dir), ".linc_work", "state")
+    repo = FileRepository(state_dir)
+    repo.save_input_signature(["genome01.faa"])
+
+    second = runner.invoke(
+        app, ["run", "-i", str(input_dir), "-o", str(output_dir), "--resume"],
+    )
+    assert second.exit_code == 0
+
+
 def test_run_append_nonexistent_dir_exits_with_error(tmp_path):
     input_dir = tmp_path / "genomes"
     input_dir.mkdir()

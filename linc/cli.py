@@ -38,7 +38,11 @@ from .core.entities import (
     VALID_EDGE_WEIGHT_MODES,
     GenomeStatus,
 )
-from .engine.genome_load_stage import GenomeIdConflictError, discover_fasta_files
+from .engine.genome_load_stage import (
+    GenomeIdConflictError,
+    build_input_signature,
+    discover_fasta_files,
+)
 from .adapters.storage.file_repo import FileRepository, StateCorruptedError
 from .pipeline import IndexMissingError, Pipeline, PipelineConfig
 
@@ -401,7 +405,6 @@ def run(
         except StateCorruptedError as exc:
             typer.secho(str(exc), fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
-        current_signature = sorted(os.path.basename(f) for f in genome_files)
         if historical_signature is None:
             typer.secho(
                 f"-o {output_dir} 下未找到历史运行记录(.linc_work/state), "
@@ -409,6 +412,21 @@ def run(
                 fg=typer.colors.RED, err=True,
             )
             raise typer.Exit(code=1)
+        # 兼容旧版签名格式(纯 basename 字符串列表): 旧格式只能做 basename
+        # 级别比对(无法感知内容是否被替换), 新格式为 (basename, size, mtime)
+        # 三元组列表, 能进一步拦住"同名但内容已变"的误用场景(2026-10-03,
+        # 第二轮漏洞"签名只比 basename"修复, 与用户权衡性能后采用 大小+mtime
+        # 而非完整内容 MD5 的折中方案)。
+        is_legacy_format = bool(historical_signature) and isinstance(historical_signature[0], str)
+        if is_legacy_format:
+            current_signature = sorted(os.path.basename(f) for f in genome_files)
+            logger.warning(
+                "历史 input_signature 为旧版格式(仅 basename), 本次校验退化为"
+                "仅比对文件名, 无法感知文件内容是否被替换; 建议重新完整运行一次"
+                "以升级签名格式。"
+            )
+        else:
+            current_signature = build_input_signature(genome_files)
         if current_signature != historical_signature:
             typer.secho(
                 f"-i {input_dir} 下发现的基因组文件集合与历史记录不一致"
