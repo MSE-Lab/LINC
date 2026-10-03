@@ -164,3 +164,42 @@ def test_resume_raises_clear_error_when_index_missing(tmp_path):
     with pytest.raises(IndexMissingError) as exc_info:
         resume_pipeline.resume([str(file_path)])
     assert "g1" in str(exc_info.value)
+
+
+def test_append_writes_audit_log_entry(tmp_path):
+    """数据管理优化第1项(append 审计轨迹, 2026-10-03 与用户确认):
+    每次 append() 成功后应写入一条审计记录, 包含本次追加的原始文件列表和
+    实际新增的 genome_id 列表; 多次 append 应累加而非覆盖历史记录。"""
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    file_a = input_dir / "gA.faa"
+    _write_fasta(str(file_a), [("x", "MKV")])
+
+    repo = FileRepository(str(tmp_path / "state"))
+    pipeline = _make_pipeline(repo)
+    pipeline.run([str(file_a)])
+    assert repo.load_append_history() == []  # run() 本身不写审计记录
+
+    append_dir = tmp_path / "append"
+    append_dir.mkdir()
+    file_b = append_dir / "gB.faa"
+    _write_fasta(str(file_b), [("y", "MKL")])
+
+    append_pipeline = _make_pipeline(repo)
+    append_pipeline.append([str(file_b)])
+
+    history = repo.load_append_history()
+    assert len(history) == 1
+    assert history[0]["new_genome_ids"] == ["gB"]
+    assert history[0]["new_genome_files"] == [str(file_b)]
+    assert "timestamp" in history[0]
+
+    # 再追加一次, 验证历史记录是累加而非覆盖。
+    file_c = append_dir / "gC.faa"
+    _write_fasta(str(file_c), [("z", "AAAA")])
+    second_append_pipeline = _make_pipeline(repo)
+    second_append_pipeline.append([str(file_c)])
+
+    history_after_second = repo.load_append_history()
+    assert len(history_after_second) == 2
+    assert history_after_second[1]["new_genome_ids"] == ["gC"]

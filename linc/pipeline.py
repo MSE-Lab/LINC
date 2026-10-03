@@ -21,6 +21,7 @@
 """
 import os
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Dict, List, Optional
 
 from .core.entities import (
@@ -348,6 +349,20 @@ class Pipeline:
         repo.save_join_result(join_result)
         repo.save_complete_ssn(complete_ssn)
         repo.save_families(families)
+
+        # 数据管理优化第1项(2026-10-03 与用户确认): append 审计轨迹——记录
+        # 本次追加的原始文件/目录、实际新增的 genome_id 列表。
+        # `skipped_genome_ids` 字段预留给未来可能出现的"静默跳过重复"场景,
+        # 当前 `GenomeLoadStage._check_genome_id_conflicts` 遇到重复
+        # genome_id 会直接抛异常中止, 不存在静默跳过, 因此该字段目前恒为空。
+        repo.append_audit_log(
+            {
+                "timestamp": datetime.now().isoformat(),
+                "new_genome_files": list(new_genome_files),
+                "new_genome_ids": sorted(new_genomes.keys()),
+                "skipped_genome_ids": [],
+            }
+        )
 
         return PipelineResult(
             genomes=merged_genomes,

@@ -84,3 +84,24 @@ def test_families_roundtrip_and_missing_returns_empty_list():
     loaded = repo.load_families()
     assert len(loaded) == 1
     assert loaded[0].family_id == "OG0000000"
+
+
+def test_append_audit_log_accumulates_instead_of_overwriting():
+    """数据管理优化第1项(2026-10-03 与用户确认): append_audit_log 应只追加,
+    不覆盖历史记录。"""
+    repo = MemoryRepository()
+    assert repo.load_append_history() == []
+    repo.append_audit_log({"timestamp": "t1", "new_genome_ids": ["g2"]})
+    repo.append_audit_log({"timestamp": "t2", "new_genome_ids": ["g3"]})
+    assert repo.load_append_history() == [
+        {"timestamp": "t1", "new_genome_ids": ["g2"]},
+        {"timestamp": "t2", "new_genome_ids": ["g3"]},
+    ]
+
+
+def test_append_audit_log_entry_is_deep_copied_not_aliased():
+    repo = MemoryRepository()
+    entry = {"timestamp": "t1", "new_genome_ids": ["g2"]}
+    repo.append_audit_log(entry)
+    entry["new_genome_ids"].append("mutated")
+    assert repo.load_append_history() == [{"timestamp": "t1", "new_genome_ids": ["g2"]}]

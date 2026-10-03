@@ -29,6 +29,7 @@ class MemoryRepository:
         self._has_complete_ssn = False
         self._has_families = False
         self._input_signature: Optional[List[Any]] = None
+        self._append_history: List[Dict[str, Any]] = []
 
     def save_genomes(self, genomes: Dict[str, Genome]) -> None:
         self._genomes = copy.deepcopy(genomes)
@@ -85,3 +86,9 @@ class MemoryRepository:
 
     def load_input_signature(self) -> Optional[List[Any]]:
         return list(self._input_signature) if self._input_signature is not None else None
+
+    def append_audit_log(self, entry: Dict[str, Any]) -> None:
+        self._append_history.append(copy.deepcopy(entry))
+
+    def load_append_history(self) -> List[Dict[str, Any]]:
+        return copy.deepcopy(self._append_history)

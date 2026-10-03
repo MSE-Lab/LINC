@@ -20,6 +20,7 @@ class FakeRepository:
         self._complete_ssn: Optional[CompleteSSN] = None
         self._families: List[OrthologFamily] = []
         self._input_signature: Optional[List[str]] = None
+        self._append_history: List[dict] = []
 
     def save_genomes(self, genomes):
         self._genomes = genomes
@@ -72,6 +73,12 @@ class FakeRepository:
     def load_input_signature(self):
         return self._input_signature
 
+    def append_audit_log(self, entry):
+        self._append_history.append(entry)
+
+    def load_append_history(self):
+        return self._append_history
+
 
 def test_fake_repository_satisfies_protocol_via_isinstance():
     assert isinstance(FakeRepository(), RepositoryPort)
@@ -122,6 +129,17 @@ def test_input_signature_roundtrip():
     assert repo.load_input_signature() is None
     repo.save_input_signature(["a.faa", "b.faa"])
     assert repo.load_input_signature() == ["a.faa", "b.faa"]
+
+
+def test_append_history_accumulates_instead_of_overwriting():
+    repo: RepositoryPort = FakeRepository()
+    assert repo.load_append_history() == []
+    repo.append_audit_log({"new_genome_ids": ["g2"]})
+    repo.append_audit_log({"new_genome_ids": ["g3"]})
+    assert repo.load_append_history() == [
+        {"new_genome_ids": ["g2"]},
+        {"new_genome_ids": ["g3"]},
+    ]
 
 
 def test_incomplete_implementation_fails_isinstance_check():

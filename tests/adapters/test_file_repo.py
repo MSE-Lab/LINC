@@ -145,3 +145,44 @@ def test_gzip_roundtrip_matches_manual_gzip_write(tmp_path):
     with gzip.open(path, "rb") as fh:
         obj = pickle.load(fh)
     assert obj.cluster_counter == 7
+
+
+def test_append_audit_log_accumulates_across_calls(tmp_path):
+    """数据管理优化第1项(2026-10-03 与用户确认): append_audit_log 应只追加,
+    不覆盖历史记录。"""
+    repo = FileRepository(str(tmp_path / "state"))
+    assert repo.load_append_history() == []
+
+    repo.append_audit_log({"timestamp": "t1", "new_genome_ids": ["g2"]})
+    repo.append_audit_log({"timestamp": "t2", "new_genome_ids": ["g3", "g4"]})
+
+    history = repo.load_append_history()
+    assert history == [
+        {"timestamp": "t1", "new_genome_ids": ["g2"]},
+        {"timestamp": "t2", "new_genome_ids": ["g3", "g4"]},
+    ]
+
+
+def test_append_audit_log_persists_across_instances(tmp_path):
+    """跨进程持久化验证: 重新构造一个 FileRepository 实例仍能读到历史记录。"""
+    state_dir = str(tmp_path / "state")
+    repo1 = FileRepository(state_dir)
+    repo1.append_audit_log({"timestamp": "t1", "new_genome_ids": ["g2"]})
+
+    repo2 = FileRepository(state_dir)
+    assert repo2.load_append_history() == [{"timestamp": "t1", "new_genome_ids": ["g2"]}]
+
+
+def test_append_audit_log_is_human_readable_json_lines(tmp_path):
+    """存储格式应为 JSON Lines(每行一条独立 JSON 对象), 而非 pickle。"""
+    state_dir = tmp_path / "state"
+    repo = FileRepository(str(state_dir))
+    repo.append_audit_log({"timestamp": "t1", "new_genome_ids": ["g2"]})
+    repo.append_audit_log({"timestamp": "t2", "new_genome_ids": ["g3"]})
+
+    path = state_dir / "append_history.jsonl"
+    assert path.exists()
+    lines = path.read_text(encoding="utf-8").strip().split("\n")
+    assert len(lines) == 2
+    import json
+    assert json.loads(lines[0]) == {"timestamp": "t1", "new_genome_ids": ["g2"]}

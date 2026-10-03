@@ -17,6 +17,7 @@
 直接 pickle 读取, 保持向后兼容(不强制用户手动迁移已有的 `.linc_work/state/`)。
 """
 import gzip
+import json
 import logging
 import os
 import pickle
@@ -53,6 +54,7 @@ class FileRepository:
         """`work_dir` 通常为 `<output_dir>/.linc_work/state`。"""
         self._state_dir = work_dir
         os.makedirs(self._state_dir, exist_ok=True)
+        self._append_history_path = os.path.join(self._state_dir, "append_history.jsonl")
 
     def _path(self, key: str) -> str:
         return os.path.join(self._state_dir, self._FILES[key])
@@ -157,3 +159,21 @@ class FileRepository:
 
     def load_input_signature(self) -> Optional[List[Any]]:
         return self._load("input_signature")
+
+    # ---- --append 审计轨迹(数据管理优化第1项, 2026-10-03 与用户确认) ----
+    # 用 JSON Lines(每行一条独立的 JSON 对象)而非 pickle 存储: 人类可读,
+    # 且天然支持"只追加、不需要整体反序列化重写"的写入模式。
+    def append_audit_log(self, entry: Dict[str, Any]) -> None:
+        with open(self._append_history_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    def load_append_history(self) -> List[Dict[str, Any]]:
+        if not os.path.exists(self._append_history_path):
+            return []
+        history = []
+        with open(self._append_history_path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    history.append(json.loads(line))
+        return history

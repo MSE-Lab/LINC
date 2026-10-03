@@ -98,3 +98,14 @@ class RepositoryPort(Protocol):
     def load_input_signature(self) -> Optional[List[Any]]:
         """加载历史保存的 `-i` 文件签名列表, 不存在则返回 None。"""
         ...
+
+    def append_audit_log(self, entry: Dict[str, Any]) -> None:
+        """追加写入一条 `--append` 操作审计记录(数据管理优化第1项, 2026-10-03
+        与用户确认)。只追加不覆盖, 记录内容由调用方(pipeline.py)构造, 典型
+        字段包括 `timestamp`/`new_genome_files`/`new_genome_ids`/
+        `skipped_genome_ids`。"""
+        ...
+
+    def load_append_history(self) -> List[Dict[str, Any]]:
+        """加载全部历史 `--append` 审计记录(按写入顺序), 不存在则返回空列表。"""
+        ...
