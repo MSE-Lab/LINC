@@ -40,7 +40,7 @@ from .core.entities import (
 )
 from .engine.genome_load_stage import GenomeIdConflictError, discover_fasta_files
 from .adapters.storage.file_repo import FileRepository, StateCorruptedError
-from .pipeline import Pipeline, PipelineConfig
+from .pipeline import IndexMissingError, Pipeline, PipelineConfig
 
 app = typer.Typer(help="LINC: 增量基因组比较构建 SSN 并通过 MCL 细分蛋白质家族。")
 
@@ -465,7 +465,7 @@ def run(
     except GenomeIdConflictError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
-    except StateCorruptedError as exc:
+    except (StateCorruptedError, IndexMissingError) as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 

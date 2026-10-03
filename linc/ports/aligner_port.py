@@ -64,6 +64,19 @@ class AlignerPort(Protocol):
         """
         ...
 
+    def index_exists(self, index: Any) -> bool:
+        """检查 `build_index` 返回的 handle 对应的索引当前是否仍然可用。
+
+        用于 `--resume` 场景(第二轮漏洞5, 2026-10-03 与用户确认): state pkl
+        中持久化的 `GenomeIntraResult.genome_index` 只是一个不透明 handle
+        (如 mmseqs/diamond 的 DB 路径字符串), 若用户手动删除了
+        `.linc_work/mmseqs_db` 等索引目录而 state 还在, 直接复用该 handle
+        发起 `search` 会在比对工具子进程层面崩溃、报错不友好。调用方
+        (`Pipeline.resume`)应在复用任何 `genome_index` 之前先调用本方法
+        校验, 不可用时及早给出清晰的错误提示而非让子进程崩溃。
+        """
+        ...
+
     def align_all_vs_all(self, genes: Sequence[Gene]) -> List[AlignmentResult]:
         """基因组内全对全比对 (Step2 用途)。"""
         ...

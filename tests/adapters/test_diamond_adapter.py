@@ -237,6 +237,24 @@ def test_build_index_empty_genes_returns_none_without_calling_subprocess(monkeyp
     assert aligner.build_index([]) is None
 
 
+def test_index_exists_true_when_dmnd_file_present(tmp_path):
+    # 第二轮漏洞5回归测试: index_exists 应据此判断 --resume 时索引是否可用。
+    db_path = os.path.join(str(tmp_path), "db")
+    with open(f"{db_path}.dmnd", "w", encoding="utf-8") as fh:
+        fh.write("fake dmnd")
+
+    aligner = DiamondAligner(DiamondConfig(work_dir=_tmp_work_dir(tmp_path)))
+    assert aligner.index_exists(db_path) is True
+
+
+def test_index_exists_false_when_dmnd_file_missing(tmp_path):
+    # 索引目录被手动删除(或从未建立)时应返回 False, 而不是让 blastp 子进程崩溃。
+    db_path = os.path.join(str(tmp_path), "does_not_exist", "db")
+    aligner = DiamondAligner(DiamondConfig(work_dir=_tmp_work_dir(tmp_path)))
+    assert aligner.index_exists(db_path) is False
+    assert aligner.index_exists(None) is False
+
+
 def test_search_runs_blastp_against_persisted_index_without_query_makedb(monkeypatch, tmp_path):
     """diamond 的 search() 不需要像 mmseqs 那样对 query 单独建库, 只调用一次 blastp。"""
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/diamond")

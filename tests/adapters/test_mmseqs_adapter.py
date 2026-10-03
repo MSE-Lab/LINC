@@ -276,6 +276,26 @@ def test_build_index_empty_genes_returns_none_without_calling_subprocess(monkeyp
     assert aligner.build_index([]) is None
 
 
+def test_index_exists_true_when_db_and_dbtype_files_present(tmp_path):
+    # 第二轮漏洞5回归测试: index_exists 应据此判断 --resume 时索引是否可用。
+    db_path = os.path.join(str(tmp_path), "db")
+    with open(db_path, "w", encoding="utf-8") as fh:
+        fh.write("fake db")
+    with open(f"{db_path}.dbtype", "w", encoding="utf-8") as fh:
+        fh.write("fake dbtype")
+
+    aligner = MMseqsAligner(MMseqsConfig(work_dir=_tmp_work_dir(tmp_path)))
+    assert aligner.index_exists(db_path) is True
+
+
+def test_index_exists_false_when_index_files_missing(tmp_path):
+    # 索引目录被手动删除(或从未建立)时应返回 False, 而不是让 search 子进程崩溃。
+    db_path = os.path.join(str(tmp_path), "does_not_exist", "db")
+    aligner = MMseqsAligner(MMseqsConfig(work_dir=_tmp_work_dir(tmp_path)))
+    assert aligner.index_exists(db_path) is False
+    assert aligner.index_exists(None) is False
+
+
 def test_search_runs_createdb_search_convertalis_against_persisted_index(monkeypatch, tmp_path):
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
     calls = []

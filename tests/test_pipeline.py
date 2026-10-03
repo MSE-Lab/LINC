@@ -1,10 +1,22 @@
 """Pipeline 的 resume()/append() 单元测试(2026-10-02, 第8步)。"""
 import os
 
+import pytest
+
 from linc.adapters.aligners.mock_adapter import MockAligner
 from linc.adapters.clustering.union_find_adapter import UnionFindClustering
 from linc.adapters.storage.file_repo import FileRepository
-from linc.pipeline import Pipeline, PipelineConfig
+from linc.pipeline import IndexMissingError, Pipeline, PipelineConfig
+
+
+class _IndexAlwaysMissingAligner(MockAligner):
+    """包装 MockAligner, 模拟"索引已被手动删除"的场景(第二轮漏洞5回归测试,
+    2026-10-03): `build_index`/`search` 等行为不变, 只有 `index_exists`
+    恒返回 False。
+    """
+
+    def index_exists(self, index) -> bool:
+        return False
 
 
 def _write_fasta(path: str, records: list) -> None:
@@ -110,3 +122,45 @@ def test_append_cluster_ids_do_not_collide_with_historical_ones(tmp_path):
     new_cluster_ids = {c.cluster_id for c in appended.join_result.global_lib.clusters if c.active}
     # 历史簇id应全部仍然存在于合并后的库中(未被覆盖)。
     assert historical_cluster_ids.issubset(new_cluster_ids)
+
+
+def test_resume_raises_clear_error_when_index_missing(tmp_path):
+    # 第二轮漏洞5回归测试: --resume 只校验 state 是否存在, 但未校验
+    # intra_results.genome_index 指向的索引是否仍可用。若索引被手动删除
+    # (这里用 _IndexAlwaysMissingAligner 模拟), resume 应在复用索引前
+    # 主动抛出 IndexMissingError(而非让比对工具子进程崩溃), 错误信息中
+    # 应点名缺失的 genome_id。
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    file_path = input_dir / "g1.faa"
+    _write_fasta(str(file_path), [("x", "MKV")])
+
+    repo = FileRepository(str(tmp_path / "state"))
+    first_pipeline = Pipeline(
+        aligner=MockAligner(),
+        clustering_for_intra=UnionFindClustering(),
+        clustering_for_mcl=UnionFindClustering(),
+        repository=repo,
+        config=PipelineConfig(),
+    )
+    first_pipeline.run([str(file_path)])
+
+    # 模拟"只跑到 intra_results 就中断"(resume 需要真正走到
+    # `repo.has_intra_results()` 分支才会触发索引校验), 同时换上一个
+    # "索引恒缺失"的 aligner 模拟用户手动删除了索引目录。
+    state_dir = tmp_path / "state"
+    for name in ("join_result.pkl", "complete_ssn.pkl", "families.pkl"):
+        p = state_dir / name
+        if p.exists():
+            os.remove(p)
+
+    resume_pipeline = Pipeline(
+        aligner=_IndexAlwaysMissingAligner(),
+        clustering_for_intra=UnionFindClustering(),
+        clustering_for_mcl=UnionFindClustering(),
+        repository=repo,
+        config=PipelineConfig(),
+    )
+    with pytest.raises(IndexMissingError) as exc_info:
+        resume_pipeline.resume([str(file_path)])
+    assert "g1" in str(exc_info.value)

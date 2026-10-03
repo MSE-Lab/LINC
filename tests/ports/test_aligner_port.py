@@ -52,6 +52,9 @@ class FakeAligner:
     def search(self, query: Sequence[Gene], index) -> List[AlignmentResult]:
         return self.align_query_vs_subject(query, index)
 
+    def index_exists(self, index) -> bool:
+        return bool(index)
+
 
 def _make_genes() -> List[Gene]:
     return [

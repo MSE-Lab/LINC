@@ -39,6 +39,19 @@ from .engine.ssn_builder_stage import SSNBuilderStage
 from .ports.storage_port import RepositoryPort
 
 
+class IndexMissingError(RuntimeError):
+    """`--resume` 时发现历史 state 引用的比对索引已缺失(第二轮漏洞5,
+    2026-10-03 与用户确认)。
+
+    `GenomeIntraResult.genome_index` 只是 `AlignerPort.build_index` 返回的
+    不透明 handle(如 mmseqs/diamond 的 DB 路径), state pkl 只持久化这个
+    handle 本身, 不代表其指向的索引文件仍然存在。若用户手动删除了
+    `.linc_work/mmseqs_db`(或 diamond 对应目录)而 state 还在, 直接复用该
+    handle 发起比对会在子进程层面崩溃、报错不友好, 因此在 `resume()` 中
+    提前校验并抛出本异常, 由调用方(cli.py)给出清晰的修复指引。
+    """
+
+
 @dataclass
 class PipelineConfig:
     """Pipeline 运行所需的全部算法参数, 收拢自 cli.py 的 `run` 命令选项。"""
@@ -85,6 +98,29 @@ class Pipeline:
         self._clustering_for_mcl = clustering_for_mcl
         self._repository = repository
         self._config = config
+
+    def _check_genome_indexes(self, intra_results: Dict[str, GenomeIntraResult]) -> None:
+        """校验 `intra_results` 中每个非空 `genome_index` 对应的索引仍可用。
+
+        仅在 `--resume` 从历史 state 加载 `intra_results` 时调用(第二轮
+        漏洞5, 2026-10-03 与用户确认): 后续 Stage(GlobalJoinStage/
+        SSNBuilderStage)会直接复用这些 handle 发起 `search`, 若对应索引
+        已被用户手动删除, 应在此处提前失败并给出清晰指引, 而不是让比对
+        工具子进程崩溃。
+        """
+        missing = [
+            genome_id
+            for genome_id, intra in intra_results.items()
+            if intra.genome_index is not None
+            and not self._aligner.index_exists(intra.genome_index)
+        ]
+        if missing:
+            raise IndexMissingError(
+                "--resume 失败: 以下基因组的比对索引已缺失(可能被手动删除), "
+                f"而历史 state 仍引用它们: {sorted(missing)}; "
+                "索引与 state 必须配套存在才能安全续跑, 请删除 -o 目录下的 "
+                ".linc_work 后重新执行一次完整的 `linc run`。"
+            )
 
     @staticmethod
     def _loaded_only(genomes: Dict[str, Genome]) -> Dict[str, Genome]:
@@ -224,6 +260,7 @@ class Pipeline:
 
         if repo.has_intra_results():
             intra_results = repo.load_intra_results()
+            self._check_genome_indexes(intra_results)
         else:
             intra_results = self._run_intra(loaded_genomes)
             repo.save_intra_results(intra_results)

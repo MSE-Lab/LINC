@@ -211,6 +211,18 @@ class MMseqsAligner:
             ) from exc
         return db_path
 
+    def index_exists(self, index: Any) -> bool:
+        """检查 `build_index` 返回的 DB 路径对应的 mmseqs 数据库文件是否仍存在。
+
+        mmseqs createdb 的产物以 `index` 为主文件名, 并附带 `.dbtype` 等
+        元数据文件; 这里只检查 `.dbtype`(createdb 成功的明确标志)和主文件
+        本身, 不要求完整校验所有辅助文件(第二轮漏洞5, 2026-10-03 与用户
+        确认)。
+        """
+        if not index:
+            return False
+        return os.path.exists(str(index)) and os.path.exists(f"{index}.dbtype")
+
     def search(
         self,
         query: Sequence[Gene],

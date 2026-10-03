@@ -79,6 +79,12 @@ class MockAligner:
         """Mock 场景无需真正建库, 直接以基因列表本身作为"索引" handle。"""
         return list(genes)
 
+    def index_exists(self, index: Any) -> bool:
+        """Mock 场景的"索引"只是内存中的基因列表, 不涉及真实文件, 只要该
+        handle 非空即视为"存在"(第二轮漏洞5, 2026-10-03 与用户确认)。
+        """
+        return bool(index)
+
     def search(
         self,
         query: Sequence[Gene],

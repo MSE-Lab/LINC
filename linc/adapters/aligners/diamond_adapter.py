@@ -198,6 +198,17 @@ class DiamondAligner:
             ) from exc
         return db_path
 
+    def index_exists(self, index: Any) -> bool:
+        """检查 `build_index` 返回的路径对应的 diamond `.dmnd` 索引文件是否仍存在。
+
+        `makedb -d <db_path>` 会生成 `<db_path>.dmnd`, 这是建库成功的明确
+        标志(第二轮漏洞5, 2026-10-03 与用户确认, 与 mmseqs_adapter 的
+        `index_exists` 保持一致的校验思路)。
+        """
+        if not index:
+            return False
+        return os.path.exists(f"{index}.dmnd")
+
     def search(
         self,
         query: Sequence[Gene],
