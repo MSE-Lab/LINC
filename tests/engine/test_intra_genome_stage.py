@@ -125,6 +125,30 @@ def test_divergent_cluster_uses_multi_representative_clustering():
     assert reps & {c.gene_id, d.gene_id}
 
 
+def test_high_identity_but_low_coverage_pair_triggers_multi_representative():
+    # 第二轮漏洞3回归测试: a-b-c 两两 identity=0.9(均>=cutoff_ii=0.8), 但
+    # a-c 这一对 coverage 很低(0.1, < cutoff_c=0.5), a-b/b-c 的 coverage
+    # 都达标(0.9)。a-c 因 coverage 不达标不会直接连边(仍可经由 b 间接
+    # 连通成一个簇), 但代表选取阶段若仍只看"最小 identity"会误判为"整体
+    # 均质"而只选 1 个中心代表; 修复后 _select_representatives 要求簇内
+    # 任意两个成员同时满足 identity>=cutoff_ii 且 coverage>=cutoff_c, a-c
+    # 这一对不达标应触发 multi_representative_clustering, 选出 >= 2 个代表。
+    a, b, c = (_make_gene("g1", i) for i in range(1, 4))
+    aligner = MockAligner()
+    aligner.set_result(a.gene_id, b.gene_id, _result(a, b, identity=0.9, query_cover=0.9, subject_cover=0.9))
+    aligner.set_result(b.gene_id, c.gene_id, _result(b, c, identity=0.9, query_cover=0.9, subject_cover=0.9))
+    aligner.set_result(a.gene_id, c.gene_id, _result(a, c, identity=0.9, query_cover=0.1, subject_cover=0.1))
+    genome = Genome(genome_id="g1", file_path="g1.faa", genes=[a, b, c])
+
+    result = _stage(aligner, cutoff_i=0.5, cutoff_ii=0.8, cutoff_c=0.5).run(genome)
+
+    assert result.n_clusters == 1
+    cluster = result.local_clusters[0]
+    assert len(cluster.member_ids) == 3
+    # 修复前会错误地只选出 1 个中心代表; 修复后应为多代表(>= 2)。
+    assert len(cluster.representative_ids) >= 2
+
+
 def test_representative_count_never_exceeds_max_per_cluster():
     # 构造 6 个两两低相似度(刚好达到 cutoff_i 成簇)的基因, 验证代表数不超过上限
     genes = [_make_gene("g1", i) for i in range(1, 7)]

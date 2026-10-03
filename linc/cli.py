@@ -225,8 +225,9 @@ def run(
         0.8, "--cutoff-ii", help="Cutoff-II(高置信阈值): 判定代表选取策略。"
     ),
     cutoff_c: float = typer.Option(
-        0.0, "--cutoff-c", help="Cutoff-C(覆盖度纳入阈值): 与 --cutoff-i 共同判定是否成簇, "
-             "默认 0.0 等价于不启用覆盖度过滤。"
+        0.5, "--cutoff-c", help="Cutoff-C(覆盖度纳入阈值): 与 --cutoff-i 共同判定是否成簇, "
+             "同时也与 --cutoff-ii 共同判定高置信代表选取/并入决策(第二轮漏洞3修复, "
+             "2026-10-03); 默认 0.5。设为 0.0 等价于不启用覆盖度过滤(回退为旧行为)。"
     ),
     cov_mode: int = typer.Option(
         0, "--cov-mode",

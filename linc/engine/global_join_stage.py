@@ -51,7 +51,7 @@ class GlobalJoinStage:
         aligner: AlignerPort,
         cutoff_i: float = 0.5,
         cutoff_ii: float = 0.8,
-        cutoff_c: float = 0.0,
+        cutoff_c: float = 0.5,
         cov_mode: int = COV_MODE_BIDIRECTIONAL,
         max_per_cluster: int = 5,
         event_bus: Optional[EventBus] = None,
@@ -225,7 +225,17 @@ class GlobalJoinStage:
         if len(hit_by_cluster) == 1:
             # 路径②: 单簇命中
             (cluster_id, best_hit), = hit_by_cluster.items()
-            if best_hit.identity >= self._cutoff_ii:
+            # 第二轮漏洞3修复(2026-10-03, 与用户确认): 高置信判定此前
+            # 只看 identity, 改为 identity >= cutoff_ii 且 coverage >= cutoff_c
+            # 的双条件判定, 避免 identity 高但 coverage 很低的碎片匹配被
+            # 误判为高置信。注意此处的 hit.coverage 是 AlignmentResult 的
+            # bidirectional property(min(query_cover, subject_cover)), 与
+            # passes_inclusion_cutoff() 中按 self._cov_mode 计算的 coverage
+            # 可能不同(当 cov_mode=1/2 时): 这是有意为之, 高置信判定采用
+            # 更保守的双向 coverage, 避免在 cov_mode=1/2 下仅因单向 coverage
+            # 达标就把一个实际上只单向覆盖的碎片匹配误判为高置信
+            # (并缓和默认 cutoff_c 由 0.0 改为 0.5 后的影响)。
+            if best_hit.identity >= self._cutoff_ii and best_hit.coverage >= self._cutoff_c:
                 global_lib.add_member_only(cluster_id, rep_gene)
             else:
                 cluster = global_lib.get_cluster(cluster_id)
@@ -243,7 +253,13 @@ class GlobalJoinStage:
 
         # 路径③: 跨簇命中(>=2 簇)
         cluster_ids = list(hit_by_cluster.keys())
-        any_cutoff_ii = any(hit.identity >= self._cutoff_ii for hit in hit_by_cluster.values())
+        # 同上, 第二轮漏洞3修复(2026-10-03, 与用户确认): 路径③的高置信
+        # 判定同样改为 identity >= cutoff_ii 且双向 coverage >= cutoff_c
+        # 的双条件(hit.coverage 含义同上, 不随 cov_mode 变化)。
+        any_cutoff_ii = any(
+            hit.identity >= self._cutoff_ii and hit.coverage >= self._cutoff_c
+            for hit in hit_by_cluster.values()
+        )
         merged_id = self._new_cluster_id()
         if any_cutoff_ii:
             global_lib.merge_clusters(cluster_ids, merged_id)

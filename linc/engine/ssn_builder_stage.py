@@ -68,7 +68,7 @@ class SSNBuilderStage:
         mega_cluster_warning_threshold: Optional[int] = None,
         event_bus: Optional[EventBus] = None,
         cutoff_i: float = 0.5,
-        cutoff_c: float = 0.0,
+        cutoff_c: float = 0.5,
         cov_mode: int = COV_MODE_BIDIRECTIONAL,
     ) -> None:
         self._aligner = aligner

@@ -45,7 +45,7 @@ class PipelineConfig:
 
     cutoff_i: float = 0.5
     cutoff_ii: float = 0.8
-    cutoff_c: float = 0.0
+    cutoff_c: float = 0.5
     cov_mode: int = 0
     max_per_cluster: int = 5
     edge_completion_mode: str = "representative_member"

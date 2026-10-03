@@ -10,16 +10,23 @@
        做连通分量聚类,得到局部簇。
     3. 对每个局部簇选取代表序列(双阈值决策):
        - 单成员簇(孤儿基因): 自身为代表。
-       - 多成员簇: 若簇内最小 pairwise identity >= Cutoff-II(即任意两个成员
-         都高度相似, 真正意义上的"整体均质"), 选 1 个"中心代表"(与簇内其他
-         成员平均相似度最高者); 否则(至少存在一对成员差异较大, 可能存在
-         亚型分化)走 multi_representative_clustering, 用贪心覆盖(k-center
+       - 多成员簇: 若簇内任意两个成员的 pairwise identity >= Cutoff-II 且
+         coverage >= Cutoff-C(即任意两个成员都高度相似且覆盖充分, 真正
+         意义上的"整体均质"), 选 1 个"中心代表"(与簇内其他成员平均相似度
+         最高者); 否则(至少存在一对成员差异较大或覆盖不足, 可能存在亚型
+         分化)走 multi_representative_clustering, 用贪心覆盖(k-center
          近似)选出多个代表, 数量不超过 max_per_cluster。
 
        注: v1 STEP2 文档字面写的判断依据是"最大" pairwise identity, 但这在
        语义上不成立(仅凭一对高相似度成员不能代表整体均质, 且会导致贪心
        覆盖的停止条件永远无法触发), 经与用户确认后改为"最小" pairwise
-       identity 作为判断依据。
+       identity 作为判断依据。进一步, 第二轮漏洞3修复(2026-10-03, 与用户
+       确认): 高置信判定("是否已被覆盖/是否整体均质")此前只看 identity,
+       未考虑 coverage, 默认 cutoff_c=0.0(覆盖度过滤关闭)下会把
+       identity 高但 coverage 很低的碎片匹配误判为高置信。修复后统一改为
+       identity >= cutoff_ii **且** coverage >= cutoff_c 的双条件判定,
+       与 passes_inclusion_cutoff() 的 coverage 判据口径(cutoff_c)保持
+       一致; 同时 --cutoff-c 默认值由 0.0 改为 0.5, 使该过滤默认生效。
 
 全对全比对复杂度为 O(n^2)(n 为单个基因组的基因数),这是 STEP2 文档强调的
 "必须全量比对、不能增量"的固有开销;代表选取逻辑仅基于已有的相似度矩阵
@@ -57,7 +64,7 @@ class IntraGenomeStage:
         clustering: ClusteringPort,
         cutoff_i: float = 0.5,
         cutoff_ii: float = 0.8,
-        cutoff_c: float = 0.0,
+        cutoff_c: float = 0.5,
         cov_mode: int = COV_MODE_BIDIRECTIONAL,
         max_per_cluster: int = 5,
         event_bus: Optional[EventBus] = None,
@@ -88,6 +95,7 @@ class IntraGenomeStage:
         hits = self._aligner.search(genes, genome_index, tag="intra_self", self_search=True)
 
         identity_map: _IdentityMap = {}
+        coverage_map: _IdentityMap = {}
         pairwise_hits: List[AlignmentResult] = []
         graph = nx.Graph()
         graph.add_nodes_from(gene.gene_id for gene in genes)
@@ -96,6 +104,10 @@ class IntraGenomeStage:
                 continue   # 自身比对(all-vs-all 场景下 query/target 来自同一份序列集合)
             identity_map[(hit.query_id, hit.subject_id)] = hit.identity
             identity_map[(hit.subject_id, hit.query_id)] = hit.identity
+            # 第二轮漏洞3修复(2026-10-03, 与用户确认): 同步记录 coverage,
+            # 用于代表选取阶段的高置信判定不再只看 identity。
+            coverage_map[(hit.query_id, hit.subject_id)] = hit.coverage
+            coverage_map[(hit.subject_id, hit.query_id)] = hit.coverage
             pairwise_hits.append(hit)
             if passes_inclusion_cutoff(hit, self._cutoff_i, self._cutoff_c, self._cov_mode):
                 graph.add_edge(hit.query_id, hit.subject_id)
@@ -115,7 +127,7 @@ class IntraGenomeStage:
                 orphan_genes.extend(representative_ids)
             else:
                 representative_ids = self._select_representatives(
-                    member_ids, identity_map
+                    member_ids, identity_map, coverage_map
                 )
 
             local_clusters.append(
@@ -160,17 +172,26 @@ class IntraGenomeStage:
         return result
 
     def _select_representatives(
-        self, member_ids, identity_map: _IdentityMap
+        self, member_ids, identity_map: _IdentityMap, coverage_map: _IdentityMap
     ) -> List[str]:
         members = sorted(member_ids)
-        min_identity = 1.0
+        # 第二轮漏洞3修复(2026-10-03, 与用户确认): 是否"整体均质"需要
+        # 簇内任意两个成员同时满足 identity >= cutoff_ii 且
+        # coverage >= cutoff_c, 而不是只看 identity。
+        all_high_confidence = True
         for i, a in enumerate(members):
             for b in members[i + 1:]:
-                min_identity = min(min_identity, identity_map.get((a, b), 0.0))
+                identity = identity_map.get((a, b), 0.0)
+                coverage = coverage_map.get((a, b), 0.0)
+                if identity < self._cutoff_ii or coverage < self._cutoff_c:
+                    all_high_confidence = False
+                    break
+            if not all_high_confidence:
+                break
 
-        if min_identity >= self._cutoff_ii:
+        if all_high_confidence:
             return [self._select_central_representative(members, identity_map)]
-        return self._multi_representative_clustering(members, identity_map)
+        return self._multi_representative_clustering(members, identity_map, coverage_map)
 
     @staticmethod
     def _select_central_representative(
@@ -191,14 +212,16 @@ class IntraGenomeStage:
         return best_member
 
     def _multi_representative_clustering(
-        self, members: List[str], identity_map: _IdentityMap
+        self, members: List[str], identity_map: _IdentityMap, coverage_map: _IdentityMap
     ) -> List[str]:
         """贪心覆盖(k-center 近似)选出多个代表。
 
         1. 先选 1 个"中心代表"(与簇内其他成员平均相似度最高者)。
-        2. 反复选"与已选代表集合的最大相似度最低"的剩余成员作为新代表,
-           直到达到 max_per_cluster 个,或剩余成员都已被某代表"覆盖"
-           (相似度 >= Cutoff-II)为止。
+        2. 反复选"与已选代表集合的最大相似度最低"的剩余成员作为新代表
+           (这一步仍用 identity 作为贪心多样性的依据), 直到达到
+           max_per_cluster 个, 或剩余成员都已被某代表"覆盖"(第二轮漏洞3
+           修复, 2026-10-03, 与用户确认: 覆盖判定改为 identity >= Cutoff-II
+           且 coverage >= Cutoff-C 的双条件)为止。
         """
         representatives = [
             self._select_central_representative(members, identity_map)
@@ -211,8 +234,15 @@ class IntraGenomeStage:
                     identity_map.get((member, rep), 0.0) for rep in representatives
                 )
 
+            def is_covered(member: str) -> bool:
+                return any(
+                    identity_map.get((member, rep), 0.0) >= self._cutoff_ii
+                    and coverage_map.get((member, rep), 0.0) >= self._cutoff_c
+                    for rep in representatives
+                )
+
             candidate = min(remaining, key=max_sim_to_reps)
-            if max_sim_to_reps(candidate) >= self._cutoff_ii:
+            if is_covered(candidate):
                 break
             representatives.append(candidate)
             remaining.remove(candidate)

@@ -280,6 +280,73 @@ def test_cov_mode_query_only_ignores_low_subject_coverage():
     assert result.n_representatives_final == 1
 
 
+def test_cutoff_ii_high_identity_but_low_coverage_adds_new_representative():
+    # 第二轮漏洞3回归测试: 路径②(单簇命中) identity >= cutoff_ii, 但双向
+    # coverage(query/subject 中较小者)低于 cutoff_c(碎片匹配)。
+    #
+    # 用 cov_mode=2(仅看 query_cover)让该命中先通过"是否纳入SSN"的
+    # inclusion 过滤(query_cover=0.9 达标), 但 subject_cover 很低(0.1),
+    # 双向 coverage(= min(0.9, 0.1) = 0.1)不达标。修复前"高置信"判定只看
+    # identity, 会被误判为高置信直接 add_member_only; 修复后高置信判定统一
+    # 用双向 coverage 与 cutoff_c 比较(与 inclusion 过滤的 cov_mode 相对
+    # 独立, 更保守), 应改为新增代表, 不丢失家族内亚型分辨率。
+    a = _gene("g1", 1, length=100)
+    b = _gene("g2", 1, length=100)
+    genome_a, intra_a = _make_genome_and_intra("g1", [a], [a.gene_id])
+    genome_b, intra_b = _make_genome_and_intra("g2", [b], [b.gene_id])
+
+    aligner = MockAligner()
+    aligner.set_result(
+        a.gene_id, b.gene_id,
+        _result(a, b, identity=0.95, query_cover=0.9, subject_cover=0.1),
+    )
+
+    result = _stage(
+        aligner, cutoff_i=0.5, cutoff_ii=0.8, cutoff_c=0.5, cov_mode=2
+    ).run({"g1": genome_a, "g2": genome_b}, {"g1": intra_a, "g2": intra_b})
+
+    assert result.n_clusters_final == 1
+    assert result.n_representatives_final == 2   # b 应增补为新代表, 而非只做 member
+    cluster = result.global_lib.clusters[0]
+    assert cluster.representative_ids == {a.gene_id, b.gene_id}
+
+
+def test_cutoff_ii_merge_path_high_identity_but_low_coverage_adds_representative():
+    # 第二轮漏洞3回归测试: 路径③(跨簇命中, >=2簇) 同样的高置信判定修复,
+    # 用法同上(cov_mode=2 让命中先通过 inclusion 过滤, 但双向 coverage 不
+    # 达标), 所有命中都不应被判定为 any_cutoff_ii, 新代表应被新增
+    # (merge_clusters 带 new_representative)。
+    a = _gene("g1", 1, length=10)
+    b = _gene("g2", 1, length=1000)
+    c = _gene("g3", 1, length=50)
+    genome_a, intra_a = _make_genome_and_intra("g1", [a], [a.gene_id])
+    genome_b, intra_b = _make_genome_and_intra("g2", [b], [b.gene_id])
+    genome_c, intra_c = _make_genome_and_intra("g3", [c], [c.gene_id])
+
+    aligner = MockAligner()
+    aligner.set_result(
+        a.gene_id, c.gene_id,
+        _result(a, c, identity=0.95, query_cover=0.9, subject_cover=0.1),
+    )
+    aligner.set_result(
+        b.gene_id, c.gene_id,
+        _result(b, c, identity=0.95, query_cover=0.9, subject_cover=0.1),
+    )
+
+    result = _stage(
+        aligner, cutoff_i=0.5, cutoff_ii=0.8, cutoff_c=0.5, cov_mode=2
+    ).run(
+        {"g1": genome_a, "g2": genome_b, "g3": genome_c},
+        {"g1": intra_a, "g2": intra_b, "g3": intra_c},
+    )
+
+    assert result.n_clusters_final == 1
+    assert result.n_representatives_final == 3   # a、b、c 均为代表(c 未被跳过)
+    active_clusters = [cl for cl in result.global_lib.clusters if cl.active]
+    assert len(active_clusters) == 1
+    assert active_clusters[0].representative_ids == {a.gene_id, b.gene_id, c.gene_id}
+
+
 def test_max_per_cluster_caps_single_cluster_path_representatives():
     # 验证路径②(单簇命中、仅达 cutoff_i)增补代表时不超过 max_per_cluster。
     base = _gene("g1", 1, length=100)
