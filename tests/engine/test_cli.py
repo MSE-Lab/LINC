@@ -337,6 +337,50 @@ def test_run_invalid_aligner_exits_with_error(tmp_path):
     assert not output_dir.exists()
 
 
+def test_run_missing_aligner_binary_exits_cleanly_without_traceback(tmp_path, monkeypatch):
+    """工程审查问题4(2026-10-03 与用户确认): 当 `_build_aligner()` 因缺失
+    外部二进制(如 mmseqs 未安装)抛出 `RuntimeError` 时, CLI 应以干净的
+    `Exit(1)` + 红色错误信息退出, 而不是暴露未捕获的 Python traceback。
+    """
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("未找到 mmseqs 可执行文件, 请先安装 mmseqs2")
+
+    monkeypatch.setattr(cli_module, "_build_aligner", _raise)
+
+    result = runner.invoke(app, ["run", "-i", str(input_dir), "-o", str(output_dir)])
+
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "未找到 mmseqs" in result.stdout or "未找到 mmseqs" in (result.stderr or "")
+
+
+def test_run_missing_clustering_binary_exits_cleanly_without_traceback(tmp_path, monkeypatch):
+    """工程审查问题4(2026-10-03 与用户确认): 当 `_build_clustering()` 因
+    缺失外部二进制(如 mcl 未安装)抛出 `RuntimeError` 时, CLI 应以干净的
+    `Exit(1)` + 红色错误信息退出, 而不是暴露未捕获的 Python traceback。
+    """
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("未找到 mcl 可执行文件, 请先安装 mcl")
+
+    monkeypatch.setattr(cli_module, "_build_clustering", _raise)
+
+    result = runner.invoke(app, ["run", "-i", str(input_dir), "-o", str(output_dir)])
+
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "未找到 mcl" in result.stdout or "未找到 mcl" in (result.stderr or "")
+
+
 def test_run_full_edge_completion_mode_end_to_end(tmp_path):
     input_dir = tmp_path / "genomes"
     input_dir.mkdir()

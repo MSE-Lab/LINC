@@ -393,7 +393,14 @@ def run(
             err=True,
         )
 
-    aligner = _build_aligner(aligner_backend, threads, output_dir)
+    try:
+        aligner = _build_aligner(aligner_backend, threads, output_dir)
+    except RuntimeError as exc:
+        # 工程审查问题4(2026-10-03 与用户确认): 缺失外部二进制(如 mmseqs/
+        # diamond 未安装)时, 构造函数会抛出 RuntimeError, 这里统一兜底为
+        # 干净的报错退出, 而不是让用户看到未捕获的 Python traceback。
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
     if aligner is None:
         typer.secho(
             f"未知的 --aligner 取值: {aligner_backend}(可选: mmseqs | diamond)",
@@ -462,10 +469,19 @@ def run(
             )
             raise typer.Exit(code=1)
 
+    try:
+        clustering_for_mcl = _build_clustering(output_dir)
+    except RuntimeError as exc:
+        # 工程审查问题4(2026-10-03 与用户确认): 缺失外部二进制(如 mcl 未
+        # 安装)时, 构造函数会抛出 RuntimeError, 这里统一兜底为干净的报错
+        # 退出, 而不是让用户看到未捕获的 Python traceback。
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
     pipeline = Pipeline(
         aligner=aligner,
         clustering_for_intra=UnionFindClustering(),
-        clustering_for_mcl=_build_clustering(output_dir),
+        clustering_for_mcl=clustering_for_mcl,
         repository=repository,
         config=PipelineConfig(
             cutoff_i=cutoff_i,
