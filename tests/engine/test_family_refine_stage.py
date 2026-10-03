@@ -224,3 +224,57 @@ def test_multiple_isolated_genes_each_become_own_size_one_family():
     member_sets = {frozenset(f.member_genes) for f in families}
     assert member_sets == {frozenset({"X"}), frozenset({"Y"}), frozenset({"Z"})}
     assert all(f.edge_density == pytest.approx(0.0) for f in families)
+
+
+class _IncompletePartitionClustering:
+    """假 ClusteringPort: 模拟 mcl 异常返回不完整分区(丢失其中一个节点),
+    用于验证工程审查问题5的兜底补齐逻辑(2026-10-03 与用户确认)。"""
+
+    def cluster(self, graph: nx.Graph, **params) -> List[Set[str]]:
+        nodes = sorted(graph.nodes)
+        # 故意丢弃最后一个节点, 模拟 mcl 返回不完整分区。
+        return [set(nodes[:-1])]
+
+    def cleanup(self, index_id=None) -> None:
+        return None
+
+
+def test_incomplete_mcl_partition_missing_genes_are_backfilled_as_singletons(caplog):
+    """工程审查问题5(2026-10-03 与用户确认): 若 mcl 对某连通分量返回的
+    分区未覆盖全部节点(工具异常/退化输入等), 缺失的基因应被各自补回为
+    size=1 的独立家族, 而不是静默从最终结果中消失; 同时应打印 warning
+    日志便于事后排查。
+    """
+    complete_ssn = CompleteSSN(edges={_edge("A", "B"), _edge("B", "C")})
+    stage = FamilyRefineStage(clustering=_IncompletePartitionClustering())
+
+    with caplog.at_level("WARNING"):
+        families = stage.run(complete_ssn)
+
+    # A/B 被 mcl 正常分到一簇, C 被 mcl"异常丢失", 应被补回为独立家族。
+    assert len(families) == 2
+    member_sets = {frozenset(f.member_genes) for f in families}
+    assert member_sets == {frozenset({"A", "B"}), frozenset({"C"})}
+    assert any("缺失" in record.message for record in caplog.records)
+
+
+def test_incomplete_mcl_partition_all_missing_backfills_every_node(caplog):
+    """mcl 返回完全空分区(最极端的异常情况)时, 连通分量内的全部节点都
+    应被补回为各自独立的 size=1 家族。"""
+
+    class _EmptyPartitionClustering:
+        def cluster(self, graph: nx.Graph, **params) -> List[Set[str]]:
+            return []
+
+        def cleanup(self, index_id=None) -> None:
+            return None
+
+    complete_ssn = CompleteSSN(edges={_edge("A", "B")})
+    stage = FamilyRefineStage(clustering=_EmptyPartitionClustering())
+
+    with caplog.at_level("WARNING"):
+        families = stage.run(complete_ssn)
+
+    assert len(families) == 2
+    member_sets = {frozenset(f.member_genes) for f in families}
+    assert member_sets == {frozenset({"A"}), frozenset({"B"})}

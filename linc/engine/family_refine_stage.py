@@ -92,6 +92,27 @@ class FamilyRefineStage:
             for member_ids in sub_clusters:
                 family_specs.append((component_id, set(member_ids)))
 
+            # 工程审查问题5(2026-10-03 与用户确认): 防御性校验 mcl 返回的
+            # 分区是否覆盖了该连通分量的全部节点。外部工具异常(退化输入、
+            # 版本差异等)可能返回不完整的分区, 若不校验, 未被任何子簇包含
+            # 的基因会在后续生成 family 时被静默丢弃, 从最终结果中彻底
+            # 消失而不报任何错误。这里采取"兜底补齐"而非直接抛异常中断
+            # 整个 pipeline(因为这是外部工具输出异常, 不是用户输入错误,
+            # 不应让一个连通分量的问题导致整次运行失败); 缺失的基因各自
+            # 作为独立家族(size=1)补回, 并打印 warning 便于事后排查。
+            covered = set().union(*sub_clusters) if sub_clusters else set()
+            missing = set(component_nodes) - covered
+            if missing:
+                logger.warning(
+                    "FamilyRefineStage: mcl 对连通分量 %s(共 %d 个节点)返回的"
+                    "分区未覆盖全部节点, 缺失 %d 个基因: %s; 已将这些基因各自"
+                    "作为独立家族补回, 避免静默丢失(可能是 mcl 异常退出或"
+                    "退化输入导致)。",
+                    index_id, len(component_nodes), len(missing), sorted(missing),
+                )
+                for gene_id in sorted(missing):
+                    family_specs.append((component_id, {gene_id}))
+
         # 按 (component_id, 排序后的成员列表) 排序, 保证 family_id 分配顺序
         # 跨运行确定(mcl 输出簇的顺序/ dict 遍历顺序不保证跨运行一致)。
         family_specs.sort(key=lambda spec: (spec[0], sorted(spec[1])))
