@@ -30,7 +30,8 @@ def _result(
 
 
 def _stage(
-    aligner, cutoff_i=0.5, cutoff_ii=0.8, cutoff_c=0.0, cov_mode=0, max_per_cluster=5
+    aligner, cutoff_i=0.5, cutoff_ii=0.8, cutoff_c=0.0, cov_mode=0, max_per_cluster=5,
+    edge_completion_mode="representative_member",
 ) -> IntraGenomeStage:
     return IntraGenomeStage(
         aligner=aligner,
@@ -40,6 +41,7 @@ def _stage(
         cutoff_c=cutoff_c,
         cov_mode=cov_mode,
         max_per_cluster=max_per_cluster,
+        edge_completion_mode=edge_completion_mode,
     )
 
 
@@ -285,3 +287,85 @@ def test_keep_intermediate_skips_cleanup(monkeypatch):
     stage.run(genome)
 
     assert cleanup_calls["n"] == 0
+
+
+def test_edge_completion_mode_none_drops_all_pairwise_hits():
+    """性能优化空间第2项(2026-10-03 与用户确认): edge_completion_mode="none"
+    时下游 SSNBuilderStage 完全不读取 pairwise_hits, 应直接裁剪为空列表,
+    避免无用数据占用内存/落盘空间。
+    """
+    g1, g2, g3 = (_make_gene("g1", i) for i in range(1, 4))
+    aligner = MockAligner()
+    aligner.set_result(g1.gene_id, g2.gene_id, _result(g1, g2, 0.9))
+    aligner.set_result(g1.gene_id, g3.gene_id, _result(g1, g3, 0.1))
+    aligner.set_result(g2.gene_id, g3.gene_id, _result(g2, g3, 0.1))
+    genome = Genome(genome_id="g1", file_path="g1.faa", genes=[g1, g2, g3])
+
+    result = _stage(aligner, cutoff_i=0.5, edge_completion_mode="none").run(genome)
+
+    assert result.pairwise_hits == []
+    # 裁剪只影响持久化数据, 不应影响聚类/代表选取本身的正确性。
+    assert result.n_clusters == 2
+
+
+def test_edge_completion_mode_representative_member_trims_to_representative_only():
+    """representative_member 模式下只保留"至少一端是局部代表"的 hit——
+    构造一个 4 成员多代表簇, 使得至少一对 hit 的两端都不是代表, 验证该
+    hit 被裁剪掉, 而含代表的 hit 被保留。
+    """
+    a, b, c, d = (_make_gene("g1", i) for i in range(1, 5))
+    aligner = MockAligner()
+    aligner.set_result(a.gene_id, b.gene_id, _result(a, b, 0.95))
+    aligner.set_result(c.gene_id, d.gene_id, _result(c, d, 0.95))
+    aligner.set_result(a.gene_id, c.gene_id, _result(a, c, 0.55))
+    aligner.set_result(a.gene_id, d.gene_id, _result(a, d, 0.55))
+    aligner.set_result(b.gene_id, c.gene_id, _result(b, c, 0.55))
+    aligner.set_result(b.gene_id, d.gene_id, _result(b, d, 0.55))
+    genome = Genome(genome_id="g1", file_path="g1.faa", genes=[a, b, c, d])
+
+    result = _stage(
+        aligner, cutoff_i=0.5, cutoff_ii=0.8,
+        edge_completion_mode="representative_member",
+    ).run(genome)
+
+    assert result.n_clusters == 1
+    representative_set = set(result.local_representatives)
+    assert len(representative_set) == 2  # 应恰好选出 2 个代表(a 覆盖 a/b, c 覆盖 c/d)
+
+    for hit in result.pairwise_hits:
+        assert hit.query_id in representative_set or hit.subject_id in representative_set
+    # b-d 这对(两端都非代表)应被裁剪掉。
+    kept_pairs = {frozenset((h.query_id, h.subject_id)) for h in result.pairwise_hits}
+    non_representative_members = {a.gene_id, b.gene_id, c.gene_id, d.gene_id} - representative_set
+    if len(non_representative_members) == 2:
+        pruned_pair = frozenset(non_representative_members)
+        assert pruned_pair not in kept_pairs
+
+
+def test_edge_completion_mode_full_keeps_all_pairwise_hits():
+    """full 模式下需要全量 pairwise_hits(供同局部簇内成员-成员边复用),
+    不应做任何裁剪。
+    """
+    a, b, c, d = (_make_gene("g1", i) for i in range(1, 5))
+    aligner = MockAligner()
+    aligner.set_result(a.gene_id, b.gene_id, _result(a, b, 0.95))
+    aligner.set_result(c.gene_id, d.gene_id, _result(c, d, 0.95))
+    aligner.set_result(a.gene_id, c.gene_id, _result(a, c, 0.55))
+    aligner.set_result(a.gene_id, d.gene_id, _result(a, d, 0.55))
+    aligner.set_result(b.gene_id, c.gene_id, _result(b, c, 0.55))
+    aligner.set_result(b.gene_id, d.gene_id, _result(b, d, 0.55))
+    genome = Genome(genome_id="g1", file_path="g1.faa", genes=[a, b, c, d])
+
+    result = _stage(
+        aligner, cutoff_i=0.5, cutoff_ii=0.8, edge_completion_mode="full",
+    ).run(genome)
+
+    kept_pairs = {frozenset((h.query_id, h.subject_id)) for h in result.pairwise_hits}
+    assert kept_pairs == {
+        frozenset((a.gene_id, b.gene_id)),
+        frozenset((c.gene_id, d.gene_id)),
+        frozenset((a.gene_id, c.gene_id)),
+        frozenset((a.gene_id, d.gene_id)),
+        frozenset((b.gene_id, c.gene_id)),
+        frozenset((b.gene_id, d.gene_id)),
+    }

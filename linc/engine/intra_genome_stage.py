@@ -69,6 +69,7 @@ class IntraGenomeStage:
         max_per_cluster: int = 5,
         event_bus: Optional[EventBus] = None,
         cleanup_intermediate: bool = True,
+        edge_completion_mode: str = "representative_member",
     ) -> None:
         self._aligner = aligner
         self._clustering = clustering
@@ -78,6 +79,11 @@ class IntraGenomeStage:
         self._cov_mode = cov_mode
         self._max_per_cluster = max_per_cluster
         self._event_bus = event_bus
+        # 性能优化空间第2项(2026-10-03 与用户确认): pairwise_hits 按
+        # edge_completion_mode 裁剪——none 模式下游完全不读取该数据, 无需
+        # 收集; representative_member 模式只需"至少一端是局部代表"的子集;
+        # 只有 full 模式才需要全量(供同局部簇内成员-成员边复用)。
+        self._edge_completion_mode = edge_completion_mode
         # 数据管理优化第3项(2026-10-03 与用户确认): search() 落盘的中间文件
         # (search_intra_self/) 结果已转存进 pairwise_hits, 默认用完即删,
         # 避免 .linc_work 无限累积; 设为 False 可保留以便调试。
@@ -159,6 +165,8 @@ class IntraGenomeStage:
                     },
                 )
             )
+
+        pairwise_hits = self._trim_pairwise_hits(pairwise_hits, local_representatives)
 
         result = GenomeIntraResult(
             genome_id=genome.genome_id,
@@ -263,6 +271,28 @@ class IntraGenomeStage:
             remaining.remove(candidate)
 
         return representatives
+
+    def _trim_pairwise_hits(
+        self, pairwise_hits: List[AlignmentResult], local_representatives: List[str]
+    ) -> List[AlignmentResult]:
+        """按 `edge_completion_mode` 裁剪待持久化的 `pairwise_hits`(性能优化
+        空间第2项, 2026-10-03 与用户确认)。
+
+        - none: 下游 SSNBuilderStage 完全不读取该数据, 不需要收集;
+        - representative_member: 下游只在"代表-成员"补边分支里复用, 只保留
+          至少一端是局部代表的 hit;
+        - full: 下游"同局部簇跨成员-成员"补边分支需要全量, 不裁剪。
+        """
+        if self._edge_completion_mode == "none":
+            return []
+        if self._edge_completion_mode == "full":
+            return pairwise_hits
+        representative_set = set(local_representatives)
+        return [
+            hit
+            for hit in pairwise_hits
+            if hit.query_id in representative_set or hit.subject_id in representative_set
+        ]
 
     def _publish(self, event: DomainEvent) -> None:
         if self._event_bus is not None:

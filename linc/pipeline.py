@@ -145,6 +145,7 @@ class Pipeline:
             cov_mode=config.cov_mode,
             max_per_cluster=config.max_per_cluster,
             cleanup_intermediate=not config.keep_intermediate,
+            edge_completion_mode=config.edge_completion_mode,
         )
         return {
             genome_id: intra_stage.run(genome)
