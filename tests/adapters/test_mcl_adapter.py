@@ -191,3 +191,54 @@ def test_cluster_timeout_expired_raises_clear_runtime_error(monkeypatch, tmp_pat
     )
     with pytest.raises(RuntimeError, match="执行超时"):
         clustering.cluster(graph, inflation=1.5)
+
+
+def test_cluster_with_positive_threads_adds_te_flag(monkeypatch, tmp_path):
+    """工程审查问题9(2026-10-03 与用户确认): threads>0 时应在命令中追加
+    mcl 原生的 `-te <threads>` 参数(内部矩阵运算多线程化), 配合
+    FamilyRefineStage 把逐分量调用合并为全图一次调用后利用多核。"""
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mcl")
+    recorded_cmds = []
+
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
+        recorded_cmds.append(cmd)
+        output_path = cmd[cmd.index("-o") + 1]
+        with open(output_path, "w", encoding="utf-8") as fh:
+            fh.write("A\tB")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    graph = nx.Graph()
+    graph.add_edge("A", "B", weight=1.0)
+
+    clustering = MCLClustering(MCLConfig(work_dir=str(tmp_path / "mcl_work")))
+    clustering.cluster(graph, inflation=1.5, index_id="all_components", threads=8)
+
+    [cmd] = recorded_cmds
+    assert cmd[cmd.index("-te") + 1] == "8"
+
+
+def test_cluster_with_zero_or_none_threads_omits_te_flag(monkeypatch, tmp_path):
+    """threads=0(默认) 或 None 时不应追加 `-te` 参数(与 mmseqs/diamond 的
+    `--threads 0` 既有语义一致: 0/None 表示不显式指定)。"""
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mcl")
+    recorded_cmds = []
+
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
+        recorded_cmds.append(cmd)
+        output_path = cmd[cmd.index("-o") + 1]
+        with open(output_path, "w", encoding="utf-8") as fh:
+            fh.write("A\tB")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    graph = nx.Graph()
+    graph.add_edge("A", "B", weight=1.0)
+
+    clustering = MCLClustering(MCLConfig(work_dir=str(tmp_path / "mcl_work")))
+    clustering.cluster(graph, inflation=1.5, index_id="component_a", threads=0)
+    clustering.cluster(graph, inflation=1.5, index_id="component_b", threads=None)
+
+    assert all("-te" not in cmd for cmd in recorded_cmds)

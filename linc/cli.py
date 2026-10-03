@@ -515,6 +515,7 @@ def run(
                 edge_weight_mode=edge_weight_mode,
                 edge_weight_alpha=edge_weight_alpha,
                 keep_intermediate=keep_intermediate,
+                threads=threads,
             ),
         )
 

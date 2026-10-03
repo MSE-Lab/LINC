@@ -57,6 +57,7 @@ class MCLClustering:
         graph: nx.Graph,
         inflation: float = 1.5,
         index_id: Optional[str] = None,
+        threads: Optional[int] = None,
         **params,
     ) -> List[Set[str]]:
         """用外部 mcl 命令对 graph 做聚类, 返回每个簇的节点集合。
@@ -69,6 +70,12 @@ class MCLClustering:
         index_id 用于区分不同连通分量各自的持久化子目录(如
         "component_1"), 同一 index_id 重跑时覆盖旧结果, 与
         mmseqs/diamond adapter 的 `search(tag=...)` 风格保持一致。
+
+        threads(工程审查问题9, 2026-10-03 与用户确认): 若为非 None 且 > 0,
+        追加 mcl 原生的 `-te <threads>` 参数(内部矩阵运算多线程化), 用于
+        配合 `FamilyRefineStage` 把"每个连通分量一次mcl子进程"合并为
+        "全图一次mcl调用"后, 通过 mcl 自身多线程来利用多核(而不是在
+        Python 层自己管理进程池)。
         """
         if graph.number_of_edges() == 0:
             return [{node} for node in graph.nodes]
@@ -87,6 +94,8 @@ class MCLClustering:
             "-I", str(inflation),
             "-o", output_path,
         ]
+        if threads:
+            cmd.extend(["-te", str(threads)])
         logger.debug("调用 mcl: %s", " ".join(cmd))
         try:
             subprocess.run(

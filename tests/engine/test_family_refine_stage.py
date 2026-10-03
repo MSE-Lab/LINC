@@ -17,12 +17,19 @@ from linc.engine.family_refine_stage import FamilyRefineStage
 
 
 class _OneClusterPerComponent:
-    """假 ClusteringPort: 把传入的 subgraph 整体当作一个簇返回(不做真正的
-    MCL 细分), 用于验证"连通分量拆分 -> 调用 cluster() -> 汇总"这条主干
-    逻辑, 不依赖真实 MCL 效果。"""
+    """假 ClusteringPort: 把传入图里每个连通分量各自当作一个簇返回(不做
+    真正的 MCL 细分), 用于验证"连通分量拆分 -> 调用 cluster() -> 汇总"这
+    条主干逻辑, 不依赖真实 MCL 效果。
+
+    工程审查问题9(2026-10-03 与用户确认)把"每个连通分量一次cluster()
+    调用"合并为"全图一次cluster()调用"后, 本假实现必须按连通分量分别
+    返回簇(而不是盲目把传入的全部节点合并成一个簇), 才能在"传入的图
+    可能包含多个不连通分量"的新调用方式下正确模拟真实 mcl 的行为
+    (mcl 对不连通的子图天然不会产生交叉簇)。
+    """
 
     def cluster(self, graph: nx.Graph, **params) -> List[Set[str]]:
-        return [set(graph.nodes)]
+        return [set(component) for component in nx.connected_components(graph)]
 
     def cleanup(self, index_id=None) -> None:
         return None
@@ -256,6 +263,73 @@ def test_incomplete_mcl_partition_missing_genes_are_backfilled_as_singletons(cap
     member_sets = {frozenset(f.member_genes) for f in families}
     assert member_sets == {frozenset({"A", "B"}), frozenset({"C"})}
     assert any("缺失" in record.message for record in caplog.records)
+
+
+class _CountingClustering:
+    """假 ClusteringPort: 记录 cluster() 被调用的次数及每次传入的参数,
+    用于验证工程审查问题9(2026-10-03 与用户确认)的"全图一次调用"优化:
+    无论图里有多少个连通分量, cluster() 都应只被调用1次(而非N次)。"""
+
+    def __init__(self) -> None:
+        self.call_count = 0
+        self.received_threads = []
+
+    def cluster(self, graph: nx.Graph, **params) -> List[Set[str]]:
+        self.call_count += 1
+        self.received_threads.append(params.get("threads"))
+        return [set(component) for component in nx.connected_components(graph)]
+
+    def cleanup(self, index_id=None) -> None:
+        return None
+
+
+def test_multiple_components_trigger_only_one_cluster_call():
+    """工程审查问题9(2026-10-03 与用户确认): 把"每个连通分量一次cluster()
+    调用"合并为"全图一次调用", 调用次数应从 O(分量数) 降到 O(1), 即使有
+    3个独立的非孤立连通分量, 也应只触发1次 cluster() 调用; 且每个分量
+    仍各自保有独立的 component_id(与改造前语义一致)。"""
+    complete_ssn = CompleteSSN(edges={
+        _edge("A", "B"), _edge("C", "D"), _edge("E", "F"),
+    })
+    fake = _CountingClustering()
+    stage = FamilyRefineStage(clustering=fake)
+
+    families = stage.run(complete_ssn)
+
+    assert fake.call_count == 1
+    assert len(families) == 3
+    component_ids = {f.component_id for f in families}
+    assert component_ids == {1, 2, 3}
+    member_sets = {frozenset(f.member_genes) for f in families}
+    assert member_sets == {
+        frozenset({"A", "B"}), frozenset({"C", "D"}), frozenset({"E", "F"}),
+    }
+
+
+def test_threads_param_is_passed_through_to_cluster_call():
+    """工程审查问题9(2026-10-03 与用户确认): FamilyRefineStage 的
+    `threads` 构造参数应原样传给 cluster(threads=...), 供
+    MCLClustering 转换为 mcl 的 `-te` 参数。"""
+    complete_ssn = CompleteSSN(edges={_edge("A", "B")})
+    fake = _CountingClustering()
+    stage = FamilyRefineStage(clustering=fake, threads=8)
+
+    stage.run(complete_ssn)
+
+    assert fake.received_threads == [8]
+
+
+def test_isolated_genes_do_not_trigger_any_cluster_call():
+    """若全部基因都是零边孤立节点(无任何非孤立连通分量), 不应触发任何
+    cluster() 调用(与改造前"孤立节点不调用mcl"的既有行为一致)。"""
+    complete_ssn = CompleteSSN(edges=set())
+    fake = _CountingClustering()
+    stage = FamilyRefineStage(clustering=fake)
+
+    families = stage.run(complete_ssn, all_gene_ids={"X", "Y"})
+
+    assert fake.call_count == 0
+    assert len(families) == 2
 
 
 def test_incomplete_mcl_partition_all_missing_backfills_every_node(caplog):

@@ -87,6 +87,11 @@ class PipelineConfig:
     # search()/mcl 产生的中间文件即删, 避免 `.linc_work` 无限累积; 设为
     # True 保留全部中间产物以便调试(索引目录/state pkl 不受影响, 始终保留)。
     keep_intermediate: bool = False
+    # 工程审查问题9(2026-10-03 与用户确认): 传给 mcl 的 `-te` 线程数(合并
+    # 为全图一次mcl调用后, 通过 mcl 自身多线程利用多核); 0 表示不显式指定。
+    # 纯性能参数, 不影响算法结果, 已在 `_check_config_consistency` 中排除,
+    # 不参与 resume/append 的参数一致性校验(修改线程数不应触发强制重算)。
+    threads: int = 0
 
 
 @dataclass
@@ -170,10 +175,15 @@ class Pipeline:
             )
             return False
         current_config = asdict(self._config)
+        # 工程审查问题9(2026-10-03 与用户确认): `threads` 是纯性能参数
+        # (传给 mcl 的 `-te` 线程数), 不影响算法结果, 修改它不应被视为
+        # "参数不一致"而触发 ConfigMismatchError/强制重算。
+        non_semantic_fields = {"threads"}
         mismatched = {
             key: (historical_config.get(key), current_config[key])
             for key in current_config
-            if historical_config.get(key) != current_config[key]
+            if key not in non_semantic_fields
+            and historical_config.get(key) != current_config[key]
         }
         if not mismatched:
             return False
@@ -291,6 +301,7 @@ class Pipeline:
             edge_weight_mode=config.edge_weight_mode,
             edge_weight_alpha=config.edge_weight_alpha,
             cleanup_intermediate=not config.keep_intermediate,
+            threads=config.threads,
         )
         # 传入全部基因id, 以便零边的孤立基因也能被显式补成图节点, 避免在
         # nx.connected_components() 中被静默忽略而从最终家族结果中消失

@@ -49,6 +49,7 @@ class FamilyRefineStage:
         edge_weight_mode: str = "identity_x_coverage",
         edge_weight_alpha: float = 0.5,
         cleanup_intermediate: bool = True,
+        threads: int = 0,
     ) -> None:
         self._clustering = clustering
         self._inflation = inflation
@@ -57,6 +58,10 @@ class FamilyRefineStage:
         # 数据管理优化第3项(2026-10-03 与用户确认): mcl 落盘的中间文件
         # (component_*/) 结果已转存进 OrthologFamily, 默认用完即删。
         self._cleanup_intermediate = cleanup_intermediate
+        # 工程审查问题9(2026-10-03 与用户确认): 配合"全图一次mcl调用"的
+        # 优化, 通过 mcl 原生 `-te` 参数利用多核(0 表示不显式指定, 与
+        # CLI `--threads 0` 既有语义对齐)。
+        self._threads = threads
 
     def run(
         self,
@@ -72,46 +77,66 @@ class FamilyRefineStage:
             key=lambda nodes: nodes[0],
         )
 
+        # 工程审查问题9(2026-10-03 与用户确认): 把"每个连通分量一次mcl
+        # 子进程"合并为"全图一次mcl调用", 调用次数从 O(分量数) 降到 O(1)。
+        # mcl 对不连通的子图天然不会产生交叉簇(markov转移概率在分量间为0),
+        # 因此合并调用的结果与逐分量调用在数学上是等价的, 只是子进程启动
+        # 开销被摊薄, 并可通过 `-te` 利用多核(由 MCLClustering.cluster
+        # 的 threads 参数传入)。
+
         family_specs = []  # List[Tuple[component_id, member_ids: set]]
+        gene_to_component_id = {}
+        non_trivial_nodes = set()
         for component_id, component_nodes in enumerate(components, start=1):
             if len(component_nodes) == 1:
                 # 孤立节点(无边的连通分量): 不调用 mcl, 直接作为独立家族
                 # (与用户确认, 2026-10-02)。
                 family_specs.append((component_id, set(component_nodes)))
                 continue
+            for gene_id in component_nodes:
+                gene_to_component_id[gene_id] = component_id
+            non_trivial_nodes.update(component_nodes)
 
-            subgraph = graph.subgraph(component_nodes)
-            index_id = f"component_{component_id}"
+        if non_trivial_nodes:
+            combined_subgraph = graph.subgraph(non_trivial_nodes)
+            index_id = "all_components"
             sub_clusters = self._clustering.cluster(
-                subgraph,
+                combined_subgraph,
                 inflation=self._inflation,
                 index_id=index_id,
+                threads=self._threads,
             )
             if self._cleanup_intermediate:
                 self._clustering.cleanup(index_id=index_id)
             for member_ids in sub_clusters:
-                family_specs.append((component_id, set(member_ids)))
+                member_ids = set(member_ids)
+                # 每个 sub_cluster 必然完全落在某一个原始连通分量内部
+                # (mcl 不会产生跨分量簇), 任取一个成员反查其 component_id
+                # 即可, 以保持 OrthologFamily.component_id 的既有语义不变。
+                sample_gene = next(iter(member_ids))
+                component_id = gene_to_component_id[sample_gene]
+                family_specs.append((component_id, member_ids))
 
             # 工程审查问题5(2026-10-03 与用户确认): 防御性校验 mcl 返回的
-            # 分区是否覆盖了该连通分量的全部节点。外部工具异常(退化输入、
-            # 版本差异等)可能返回不完整的分区, 若不校验, 未被任何子簇包含
-            # 的基因会在后续生成 family 时被静默丢弃, 从最终结果中彻底
-            # 消失而不报任何错误。这里采取"兜底补齐"而非直接抛异常中断
-            # 整个 pipeline(因为这是外部工具输出异常, 不是用户输入错误,
-            # 不应让一个连通分量的问题导致整次运行失败); 缺失的基因各自
-            # 作为独立家族(size=1)补回, 并打印 warning 便于事后排查。
+            # 分区是否覆盖了全部非孤立节点。外部工具异常(退化输入、版本
+            # 差异等)可能返回不完整的分区, 若不校验, 未被任何子簇包含的
+            # 基因会在后续生成 family 时被静默丢弃, 从最终结果中彻底消失
+            # 而不报任何错误。这里采取"兜底补齐"而非直接抛异常中断整个
+            # pipeline(因为这是外部工具输出异常, 不是用户输入错误); 缺失
+            # 的基因各自作为独立家族(size=1)补回, 并打印 warning 便于
+            # 事后排查(按其原始 component_id 归属, 而非笼统归为一个分量)。
             covered = set().union(*sub_clusters) if sub_clusters else set()
-            missing = set(component_nodes) - covered
+            missing = non_trivial_nodes - covered
             if missing:
                 logger.warning(
-                    "FamilyRefineStage: mcl 对连通分量 %s(共 %d 个节点)返回的"
+                    "FamilyRefineStage: mcl 对全图(共 %d 个非孤立节点)返回的"
                     "分区未覆盖全部节点, 缺失 %d 个基因: %s; 已将这些基因各自"
                     "作为独立家族补回, 避免静默丢失(可能是 mcl 异常退出或"
                     "退化输入导致)。",
-                    index_id, len(component_nodes), len(missing), sorted(missing),
+                    len(non_trivial_nodes), len(missing), sorted(missing),
                 )
                 for gene_id in sorted(missing):
-                    family_specs.append((component_id, {gene_id}))
+                    family_specs.append((gene_to_component_id[gene_id], {gene_id}))
 
         # 按 (component_id, 排序后的成员列表) 排序, 保证 family_id 分配顺序
         # 跨运行确定(mcl 输出簇的顺序/ dict 遍历顺序不保证跨运行一致)。
