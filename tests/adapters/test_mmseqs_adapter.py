@@ -35,7 +35,7 @@ def test_satisfies_aligner_port(monkeypatch):
 def _fake_run_factory(tsv_lines):
     """构造一个假的 subprocess.run, 把预设的 tsv 内容写入结果文件。"""
 
-    def _fake_run(cmd, check, capture_output, text):
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
         result_tsv = cmd[4]  # easy-search 的第5个位置参数是结果文件路径
         with open(result_tsv, "w", encoding="utf-8") as fh:
             fh.write("\n".join(tsv_lines))
@@ -144,7 +144,7 @@ def test_non_numeric_field_line_is_skipped_not_raised(monkeypatch):
 def test_subprocess_failure_raises_runtime_error(monkeypatch):
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
 
-    def _fake_run_fail(cmd, check, capture_output, text):
+    def _fake_run_fail(cmd, check, capture_output, text, **kwargs):
         raise subprocess.CalledProcessError(
             returncode=1, cmd=cmd, stderr="mmseqs: command failed"
         )
@@ -160,7 +160,7 @@ def test_custom_config_values_are_used_in_command(monkeypatch):
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
     captured_cmd = {}
 
-    def _fake_run(cmd, check, capture_output, text):
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
         captured_cmd["cmd"] = cmd
         result_tsv = cmd[4]
         with open(result_tsv, "w", encoding="utf-8") as fh:
@@ -185,7 +185,7 @@ def test_easy_search_passes_max_seqs_to_avoid_default_truncation(monkeypatch):
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
     captured_cmd = {}
 
-    def _fake_run(cmd, check, capture_output, text):
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
         captured_cmd["cmd"] = cmd
         result_tsv = cmd[4]
         with open(result_tsv, "w", encoding="utf-8") as fh:
@@ -208,7 +208,7 @@ def test_easy_search_default_max_seqs_is_not_mmseqs_default_300(monkeypatch):
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
     captured_cmd = {}
 
-    def _fake_run(cmd, check, capture_output, text):
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
         captured_cmd["cmd"] = cmd
         result_tsv = cmd[4]
         with open(result_tsv, "w", encoding="utf-8") as fh:
@@ -230,7 +230,7 @@ def test_default_threads_zero_omits_threads_flag(monkeypatch):
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
     captured_cmd = {}
 
-    def _fake_run(cmd, check, capture_output, text):
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
         captured_cmd["cmd"] = cmd
         result_tsv = cmd[4]
         with open(result_tsv, "w", encoding="utf-8") as fh:
@@ -250,7 +250,7 @@ def test_build_index_runs_createdb_and_returns_persistent_db_path(monkeypatch, t
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
     captured = {}
 
-    def _fake_run(cmd, check, capture_output, text):
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
         captured["cmd"] = cmd
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
@@ -327,7 +327,7 @@ def test_search_runs_createdb_search_convertalis_against_persisted_index(monkeyp
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
     calls = []
 
-    def _fake_run(cmd, check, capture_output, text):
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
         calls.append(cmd)
         if cmd[1] == "convertalis":
             result_tsv = cmd[5]
@@ -362,7 +362,7 @@ def test_search_overwrites_previous_results_for_same_index_dir(monkeypatch, tmp_
     """重跑同一 index(如同一 genome_id)时应覆盖旧的 search/ 目录内容。"""
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
 
-    def _fake_run(cmd, check, capture_output, text):
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
         if cmd[1] == "convertalis":
             result_tsv = cmd[5]
             with open(result_tsv, "w", encoding="utf-8") as fh:
@@ -393,7 +393,7 @@ def test_search_tag_uses_separate_subdir_and_does_not_overwrite_other_tags(monke
     """
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
 
-    def _fake_run(cmd, check, capture_output, text):
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
         if cmd[1] == "convertalis":
             result_tsv = cmd[5]
             with open(result_tsv, "w", encoding="utf-8") as fh:
@@ -425,7 +425,7 @@ def test_search_self_search_skips_query_fasta_and_createdb(monkeypatch, tmp_path
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
     calls = []
 
-    def _fake_run(cmd, check, capture_output, text):
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
         calls.append(cmd)
         if cmd[1] == "convertalis":
             result_tsv = cmd[5]
@@ -463,7 +463,7 @@ def test_cleanup_search_removes_tagged_subdir_but_not_index(monkeypatch, tmp_pat
     """
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
 
-    def _fake_run(cmd, check, capture_output, text):
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
         if cmd[1] == "convertalis":
             result_tsv = cmd[5]
             with open(result_tsv, "w", encoding="utf-8") as fh:
@@ -508,3 +508,43 @@ def test_search_empty_query_or_index_returns_empty_without_calling_subprocess(mo
     aligner = MMseqsAligner(MMseqsConfig(work_dir=_tmp_work_dir(tmp_path)))
     assert aligner.search([], "/fake/db") == []
     assert aligner.search([_gene("q1", 10)], None) == []
+
+
+def test_easy_search_passes_default_timeout_to_subprocess_run(monkeypatch, tmp_path):
+    """工程审查问题8(2026-10-03 与用户确认): subprocess.run 应携带
+    MMseqsConfig.timeout_seconds(默认3600秒), 避免外部工具卡死时进程
+    永久挂起。"""
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
+    captured = {}
+
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        result_tsv = cmd[4]
+        with open(result_tsv, "w", encoding="utf-8") as fh:
+            fh.write("")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    aligner = MMseqsAligner(MMseqsConfig(work_dir=_tmp_work_dir(tmp_path)))
+    aligner.align_all_vs_all([_gene("g1", 10), _gene("g2", 10)])
+
+    assert captured["timeout"] == 3600
+
+
+def test_easy_search_timeout_expired_raises_clear_runtime_error(monkeypatch, tmp_path):
+    """工程审查问题8(2026-10-03 与用户确认): mmseqs 命令执行超时时,
+    应被转换为清晰的 RuntimeError, 而不是让 subprocess.TimeoutExpired
+    直接向上抛出。"""
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
+
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    aligner = MMseqsAligner(
+        MMseqsConfig(work_dir=_tmp_work_dir(tmp_path), timeout_seconds=5)
+    )
+    with pytest.raises(RuntimeError, match="执行超时"):
+        aligner.align_all_vs_all([_gene("g1", 10), _gene("g2", 10)])

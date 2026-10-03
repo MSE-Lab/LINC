@@ -27,7 +27,7 @@ def test_satisfies_clustering_port(monkeypatch):
 def _fake_run_factory(cluster_lines):
     """构造一个假的 subprocess.run, 把预设的 mcl 输出内容写入结果文件。"""
 
-    def _fake_run(cmd, check, capture_output, text):
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
         output_path = cmd[cmd.index("-o") + 1]
         with open(output_path, "w", encoding="utf-8") as fh:
             fh.write("\n".join(cluster_lines))
@@ -61,7 +61,7 @@ def test_cluster_passes_inflation_to_command(tmp_path, monkeypatch):
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mcl")
     recorded_cmds = []
 
-    def _fake_run(cmd, check, capture_output, text):
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
         recorded_cmds.append(cmd)
         output_path = cmd[cmd.index("-o") + 1]
         with open(output_path, "w", encoding="utf-8") as fh:
@@ -145,3 +145,49 @@ def test_empty_edge_graph_returns_singleton_clusters_without_calling_subprocess(
     clusters = clustering.cluster(graph, inflation=1.5)
 
     assert clusters == [{"A"}, {"B"}]
+
+
+def test_cluster_passes_default_timeout_to_subprocess_run(monkeypatch, tmp_path):
+    """工程审查问题8(2026-10-03 与用户确认): subprocess.run 应携带
+    MCLConfig.timeout_seconds(默认3600秒), 避免外部工具卡死时进程
+    永久挂起。"""
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mcl")
+    captured = {}
+
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        output_path = cmd[cmd.index("-o") + 1]
+        with open(output_path, "w", encoding="utf-8") as fh:
+            fh.write("A\tB\n")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    graph = nx.Graph()
+    graph.add_edge("A", "B", weight=1.0)
+
+    clustering = MCLClustering(MCLConfig(work_dir=str(tmp_path / "mcl_work")))
+    clustering.cluster(graph, inflation=1.5)
+
+    assert captured["timeout"] == 3600
+
+
+def test_cluster_timeout_expired_raises_clear_runtime_error(monkeypatch, tmp_path):
+    """工程审查问题8(2026-10-03 与用户确认): mcl 命令执行超时时,
+    应被转换为清晰的 RuntimeError, 而不是让 subprocess.TimeoutExpired
+    直接向上抛出。"""
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mcl")
+
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    graph = nx.Graph()
+    graph.add_edge("A", "B", weight=1.0)
+
+    clustering = MCLClustering(
+        MCLConfig(work_dir=str(tmp_path / "mcl_work"), timeout_seconds=5)
+    )
+    with pytest.raises(RuntimeError, match="执行超时"):
+        clustering.cluster(graph, inflation=1.5)

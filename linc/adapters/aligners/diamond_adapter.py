@@ -43,6 +43,10 @@ class DiamondConfig:
     evalue: float = 1e-5
     threads: int = 0  # 0 = 不显式指定 --threads, 让 diamond 使用默认值
     work_dir: str = _DEFAULT_WORK_DIR  # build_index 持久化索引的存放目录
+    # subprocess.run 默认无 timeout, 外部工具卡死(极端输入/磁盘满等)会导致
+    # 进程永久挂起(工程审查问题8, 2026-10-03 与用户确认)。设为一个较大的
+    # 默认值(秒), None 表示不限时, 供极端大数据场景按需调大/关闭。
+    timeout_seconds: Optional[int] = 3600
 
 
 class DiamondAligner:
@@ -93,11 +97,20 @@ class DiamondAligner:
             for cmd in (makedb_cmd, search_cmd):
                 logger.debug("调用 diamond: %s", " ".join(cmd))
                 try:
-                    subprocess.run(cmd, check=True, capture_output=True, text=True)
+                    subprocess.run(
+                        cmd, check=True, capture_output=True, text=True,
+                        timeout=self._config.timeout_seconds,
+                    )
                 except subprocess.CalledProcessError as exc:
                     raise RuntimeError(
                         f"diamond 命令执行失败(returncode={exc.returncode}): "
                         f"{exc.stderr}"
+                    ) from exc
+                except subprocess.TimeoutExpired as exc:
+                    raise RuntimeError(
+                        f"diamond 命令执行超时(限制 {self._config.timeout_seconds} 秒), "
+                        "可能是数据规模过大或工具卡死, 可通过 DiamondConfig.timeout_seconds "
+                        "调大超时限制。"
                     ) from exc
 
             return self._parse_result_tsv(result_tsv)
@@ -198,11 +211,20 @@ class DiamondAligner:
         cmd = ["diamond", "makedb", "--in", fasta_path, "-d", db_path]
         logger.debug("调用 diamond: %s", " ".join(cmd))
         try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            subprocess.run(
+                cmd, check=True, capture_output=True, text=True,
+                timeout=self._config.timeout_seconds,
+            )
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(
                 f"diamond makedb 执行失败(returncode={exc.returncode}): "
                 f"{exc.stderr}"
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"diamond makedb 执行超时(限制 {self._config.timeout_seconds} 秒), "
+                "可能是数据规模过大或工具卡死, 可通过 DiamondConfig.timeout_seconds "
+                "调大超时限制。"
             ) from exc
         return db_path
 
@@ -275,11 +297,20 @@ class DiamondAligner:
         search_cmd = self._build_search_cmd(query_fasta, index, result_tsv)
         logger.debug("调用 diamond: %s", " ".join(search_cmd))
         try:
-            subprocess.run(search_cmd, check=True, capture_output=True, text=True)
+            subprocess.run(
+                search_cmd, check=True, capture_output=True, text=True,
+                timeout=self._config.timeout_seconds,
+            )
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(
                 f"diamond 命令执行失败(returncode={exc.returncode}): "
                 f"{exc.stderr}"
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"diamond 命令执行超时(限制 {self._config.timeout_seconds} 秒), "
+                "可能是数据规模过大或工具卡死, 可通过 DiamondConfig.timeout_seconds "
+                "调大超时限制。"
             ) from exc
 
         return self._parse_result_tsv(result_tsv)

@@ -50,6 +50,10 @@ class MMseqsConfig:
     # "近似全量"(而非 0, mmseqs 不接受 0 表示不限), 兼顾大旁系家族场景与
     # 内存开销; 如遇极端规模数据集仍需用户按需调大。
     max_seqs: int = 100000
+    # subprocess.run 默认无 timeout, 外部工具卡死(极端输入/磁盘满等)会导致
+    # 进程永久挂起(工程审查问题8, 2026-10-03 与用户确认)。设为一个较大的
+    # 默认值(秒), None 表示不限时, 供极端大数据场景按需调大/关闭。
+    timeout_seconds: Optional[int] = 3600
 
 
 class MMseqsAligner:
@@ -119,12 +123,19 @@ class MMseqsAligner:
             logger.debug("调用 mmseqs: %s", " ".join(cmd))
             try:
                 subprocess.run(
-                    cmd, check=True, capture_output=True, text=True
+                    cmd, check=True, capture_output=True, text=True,
+                    timeout=self._config.timeout_seconds,
                 )
             except subprocess.CalledProcessError as exc:
                 raise RuntimeError(
                     f"mmseqs easy-search 执行失败(returncode={exc.returncode}): "
                     f"{exc.stderr}"
+                ) from exc
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(
+                    f"mmseqs easy-search 执行超时(限制 {self._config.timeout_seconds} 秒), "
+                    "可能是数据规模过大或工具卡死, 可通过 MMseqsConfig.timeout_seconds "
+                    "调大超时限制。"
                 ) from exc
 
             return self._parse_result_tsv(result_tsv)
@@ -211,11 +222,20 @@ class MMseqsAligner:
         cmd = ["mmseqs", "createdb", fasta_path, db_path, "-v", "1"]
         logger.debug("调用 mmseqs: %s", " ".join(cmd))
         try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            subprocess.run(
+                cmd, check=True, capture_output=True, text=True,
+                timeout=self._config.timeout_seconds,
+            )
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(
                 f"mmseqs createdb 执行失败(returncode={exc.returncode}): "
                 f"{exc.stderr}"
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"mmseqs createdb 执行超时(限制 {self._config.timeout_seconds} 秒), "
+                "可能是数据规模过大或工具卡死, 可通过 MMseqsConfig.timeout_seconds "
+                "调大超时限制。"
             ) from exc
         return db_path
 
@@ -311,11 +331,20 @@ class MMseqsAligner:
         for cmd in cmds:
             logger.debug("调用 mmseqs: %s", " ".join(cmd))
             try:
-                subprocess.run(cmd, check=True, capture_output=True, text=True)
+                subprocess.run(
+                    cmd, check=True, capture_output=True, text=True,
+                    timeout=self._config.timeout_seconds,
+                )
             except subprocess.CalledProcessError as exc:
                 raise RuntimeError(
                     f"mmseqs 命令执行失败(returncode={exc.returncode}): "
                     f"{exc.stderr}"
+                ) from exc
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(
+                    f"mmseqs 命令执行超时(限制 {self._config.timeout_seconds} 秒), "
+                    "可能是数据规模过大或工具卡死, 可通过 MMseqsConfig.timeout_seconds "
+                    "调大超时限制。"
                 ) from exc
 
         return self._parse_result_tsv(result_tsv)

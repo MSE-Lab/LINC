@@ -36,7 +36,7 @@ def test_satisfies_aligner_port(monkeypatch):
 def _fake_run_factory(tsv_lines):
     """构造一个假的 subprocess.run, 把预设的 tsv 内容写入 blastp 的结果文件。"""
 
-    def _fake_run(cmd, check, capture_output, text):
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
         if cmd[1] == "blastp":
             result_tsv = cmd[cmd.index("-o") + 1]
             with open(result_tsv, "w", encoding="utf-8") as fh:
@@ -147,7 +147,7 @@ def test_non_numeric_field_line_is_skipped_not_raised(monkeypatch):
 def test_subprocess_failure_raises_runtime_error(monkeypatch):
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/diamond")
 
-    def _fake_run_fail(cmd, check, capture_output, text):
+    def _fake_run_fail(cmd, check, capture_output, text, **kwargs):
         raise subprocess.CalledProcessError(
             returncode=1, cmd=cmd, stderr="diamond: command failed"
         )
@@ -163,7 +163,7 @@ def test_custom_config_values_are_used_in_command(monkeypatch):
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/diamond")
     captured_cmd = {}
 
-    def _fake_run(cmd, check, capture_output, text):
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
         if cmd[1] == "blastp":
             captured_cmd["cmd"] = cmd
             result_tsv = cmd[cmd.index("-o") + 1]
@@ -190,7 +190,7 @@ def test_default_threads_zero_omits_threads_flag(monkeypatch):
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/diamond")
     captured_cmd = {}
 
-    def _fake_run(cmd, check, capture_output, text):
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
         if cmd[1] == "blastp":
             captured_cmd["cmd"] = cmd
             result_tsv = cmd[cmd.index("-o") + 1]
@@ -211,7 +211,7 @@ def test_build_index_runs_makedb_and_returns_persistent_db_path(monkeypatch, tmp
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/diamond")
     captured = {}
 
-    def _fake_run(cmd, check, capture_output, text):
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
         captured["cmd"] = cmd
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
@@ -286,7 +286,7 @@ def test_search_runs_blastp_against_persisted_index_without_query_makedb(monkeyp
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/diamond")
     calls = []
 
-    def _fake_run(cmd, check, capture_output, text):
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
         calls.append(cmd)
         result_tsv = cmd[cmd.index("-o") + 1]
         with open(result_tsv, "w", encoding="utf-8") as fh:
@@ -315,7 +315,7 @@ def test_search_overwrites_previous_results_for_same_index_dir(monkeypatch, tmp_
     """重跑同一 index(如同一 genome_id)时应覆盖旧的 search/ 目录内容。"""
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/diamond")
 
-    def _fake_run(cmd, check, capture_output, text):
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
         result_tsv = cmd[cmd.index("-o") + 1]
         with open(result_tsv, "w", encoding="utf-8") as fh:
             fh.write("q1\ts1\t80.0\t0.8\t0.8\t1e-10\t100.0\t50\t10\t10")
@@ -345,7 +345,7 @@ def test_search_tag_uses_separate_subdir_and_does_not_overwrite_other_tags(monke
     """
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/diamond")
 
-    def _fake_run(cmd, check, capture_output, text):
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
         result_tsv = cmd[cmd.index("-o") + 1]
         with open(result_tsv, "w", encoding="utf-8") as fh:
             fh.write("q1\ts1\t80.0\t0.8\t0.8\t1e-10\t100.0\t50\t10\t10")
@@ -378,7 +378,7 @@ def test_search_self_search_reuses_genes_fasta_without_rewriting_query(monkeypat
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/diamond")
     calls = []
 
-    def _fake_run(cmd, check, capture_output, text):
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
         calls.append(cmd)
         result_tsv = cmd[cmd.index("-o") + 1]
         with open(result_tsv, "w", encoding="utf-8") as fh:
@@ -427,7 +427,7 @@ def test_cleanup_search_removes_tagged_subdir_but_not_index(monkeypatch, tmp_pat
     """
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/diamond")
 
-    def _fake_run(cmd, check, capture_output, text):
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
         result_tsv = cmd[cmd.index("-o") + 1]
         with open(result_tsv, "w", encoding="utf-8") as fh:
             fh.write("q1\ts1\t80.0\t0.8\t0.8\t1e-10\t100.0\t50\t10\t10")
@@ -458,3 +458,42 @@ def test_cleanup_search_with_falsy_index_is_noop(monkeypatch):
     # 不应抛出任何异常。
     aligner.cleanup_search(None, tag="join")
     aligner.cleanup_search("", tag="join")
+
+
+def test_run_diamond_search_passes_default_timeout_to_subprocess_run(monkeypatch):
+    """工程审查问题8(2026-10-03 与用户确认): subprocess.run 应携带
+    DiamondConfig.timeout_seconds(默认3600秒), 避免外部工具卡死时进程
+    永久挂起。"""
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/diamond")
+    captured = []
+
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
+        captured.append(kwargs.get("timeout"))
+        if cmd[1] == "blastp":
+            result_tsv = cmd[cmd.index("-o") + 1]
+            with open(result_tsv, "w", encoding="utf-8") as fh:
+                fh.write("")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    aligner = DiamondAligner()
+    aligner.align_all_vs_all([_gene("g1", 10), _gene("g2", 10)])
+
+    assert captured == [3600, 3600]
+
+
+def test_run_diamond_search_timeout_expired_raises_clear_runtime_error(monkeypatch):
+    """工程审查问题8(2026-10-03 与用户确认): diamond 命令执行超时时,
+    应被转换为清晰的 RuntimeError, 而不是让 subprocess.TimeoutExpired
+    直接向上抛出。"""
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/diamond")
+
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    aligner = DiamondAligner(DiamondConfig(timeout_seconds=5))
+    with pytest.raises(RuntimeError, match="执行超时"):
+        aligner.align_all_vs_all([_gene("g1", 10), _gene("g2", 10)])
