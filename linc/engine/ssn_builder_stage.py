@@ -175,12 +175,48 @@ class SSNBuilderStage:
         O(基因组对数), 与簇数无关; search 返回的结果可能包含"同一基因组对
         下但分属不同簇"的无关基因对, 需按 `gene_id -> cluster_id` 映射过滤,
         只保留双方属于同一个簇的结果。
+
+        补边缺口修复(2026-10-03, 与用户确认, 第二轮漏洞1): 同一基因组、
+        不同局部簇、但被全局合并进同一个全局簇的基因对, 之前既不在
+        `_add_known_intra_genome_edges()`(只覆盖同一局部簇内)的范围内,
+        也不在本方法原有逻辑(只处理 `genome_a != genome_b` 的跨基因组对,
+        且 `len(genome_ids) < 2` 时整体跳过)的范围内, 导致这部分边永久
+        缺失。修复方式: 同基因组内任意两个基因在 IntraGenomeStage 阶段
+        已经做过全对全比对(结果都在 `pairwise_hits` 里), 这里只需按
+        `gene_id -> local_cluster_id` 映射识别出"跨局部簇"的基因对,
+        直接查表补边, 不发起任何新比对, 不引入额外子进程调用。
         """
         global_lib = incremental_result.global_lib
         gene_cluster_map: Dict[str, str] = {}
 
+        # gene_id -> 所属局部簇 id(用于识别"同基因组, 跨局部簇"的基因对;
+        # 同一局部簇内的基因对已经由 _add_known_intra_genome_edges() 覆盖,
+        # 这里需要排除掉, 避免重复处理)。
+        gene_to_local_cluster: Dict[str, str] = {}
+        for intra in intra_results.values():
+            for local_cluster in intra.local_clusters:
+                for gene_id in local_cluster.member_ids:
+                    gene_to_local_cluster[gene_id] = local_cluster.cluster_id
+
+        # 每个基因组的 pairwise_hits 按 frozenset(gene_a, gene_b) 建索引,
+        # 懒加载缓存, 供"同基因组跨局部簇"补边复用, 不重新比对。
+        pair_lookup_cache: Dict[str, Dict[frozenset, AlignmentResult]] = {}
+
+        def _pair_lookup_for(genome_id: str) -> Dict[frozenset, AlignmentResult]:
+            cached = pair_lookup_cache.get(genome_id)
+            if cached is not None:
+                return cached
+            lookup: Dict[frozenset, AlignmentResult] = {}
+            intra = intra_results.get(genome_id)
+            if intra is not None:
+                for hit in intra.pairwise_hits:
+                    lookup.setdefault(frozenset((hit.query_id, hit.subject_id)), hit)
+            pair_lookup_cache[genome_id] = lookup
+            return lookup
+
         # 第一遍: 仅做簇内基因组分布统计(不涉及任何比对调用), 用于①巨簇
-        # warning 提醒 ②按基因组对聚合出去重后的 query 基因集合。
+        # warning 提醒 ②按基因组对聚合出去重后的 query 基因集合 ③顺带补齐
+        # "同基因组跨局部簇"的边(直接查表, 不算新比对)。
         query_genes_by_genome_pair: Dict[tuple, Set[str]] = {}
         for cluster in global_lib.clusters:
             if not cluster.active:
@@ -193,9 +229,38 @@ class SSNBuilderStage:
                     continue
                 members_by_genome.setdefault(gene.genome_id, []).append(gene_id)
 
+            # 同基因组、跨局部簇补边: 对簇内每个基因组, 若其成员分属多个
+            # 局部簇, 则把"局部簇不同"的基因对直接从该基因组的
+            # pairwise_hits 里查出来补边(同局部簇内的对已由
+            # _add_known_intra_genome_edges() 覆盖, 这里跳过避免重复)。
+            for genome_id, gene_ids in members_by_genome.items():
+                if len(gene_ids) < 2:
+                    continue
+                sorted_genes = sorted(gene_ids)
+                distinct_local_clusters = {
+                    gene_to_local_cluster.get(gid) for gid in sorted_genes
+                }
+                if len(distinct_local_clusters) < 2:
+                    continue   # 同一局部簇内, 已被上一步覆盖
+                pair_lookup = _pair_lookup_for(genome_id)
+                for i, gene_a in enumerate(sorted_genes):
+                    for gene_b in sorted_genes[i + 1:]:
+                        if gene_to_local_cluster.get(gene_a) == gene_to_local_cluster.get(gene_b):
+                            continue   # 同一局部簇内的对, 跳过
+                        hit = pair_lookup.get(frozenset((gene_a, gene_b)))
+                        if hit is None:
+                            continue
+                        source_length, target_length = self._lengths_for(hit, gene_a)
+                        edges.add(SSNEdge(
+                            source=gene_a, target=gene_b,
+                            identity=hit.identity, coverage=hit.coverage,
+                            bitscore=hit.bitscore,
+                            source_length=source_length, target_length=target_length,
+                        ))
+
             genome_ids = sorted(members_by_genome.keys())
             if len(genome_ids) < 2:
-                continue   # 单基因组簇, 同基因组内关系已在上一步复用完毕
+                continue   # 单基因组簇, 同基因组内关系已在上两步复用完毕
 
             n_cross_pairs = self._count_cross_genome_pairs(members_by_genome, genome_ids)
             if (

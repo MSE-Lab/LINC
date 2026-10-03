@@ -431,3 +431,68 @@ def test_inactive_global_clusters_are_skipped():
     # 非活跃簇不应触发跨基因组补边, 但同基因组内的免费复用边依旧保留
     assert frozenset(("A|2", "B|2")) not in actual_pairs
     assert frozenset(("A|2", "A|3")) in actual_pairs
+
+
+def test_full_mode_fills_same_genome_cross_local_cluster_gap(monkeypatch):
+    """第二轮漏洞1回归测试: 同一基因组、不同局部簇、但被全局合并进同一个
+    全局簇的两个基因, 其 SSN 边应被补齐(直接复用已有 pairwise_hits, 不
+    触发任何新比对调用)。
+    """
+    a1, a2 = _gene("A|1", "A"), _gene("A|2", "A")
+    genomes = {
+        "A": Genome(genome_id="A", file_path="a.faa", genes=[a1, a2]),
+    }
+    intra_results = {
+        "A": GenomeIntraResult(
+            genome_id="A",
+            # A|1 和 A|2 分属两个不同的局部簇(IntraGenomeStage 阶段未被
+            # 聚到一起), 但 pairwise_hits 里仍保留了二者的全对全比对结果。
+            local_clusters=[
+                LocalCluster(cluster_id="A|cluster_0", member_ids={"A|1"},
+                              representative_ids=["A|1"], is_orphan=True),
+                LocalCluster(cluster_id="A|cluster_1", member_ids={"A|2"},
+                              representative_ids=["A|2"], is_orphan=True),
+            ],
+            local_representatives=["A|1", "A|2"],
+            n_genes=2, n_clusters=2, n_representatives=2,
+            pairwise_hits=[_hit("A|1", "A|2", identity=0.95, coverage=0.9)],
+        ),
+    }
+    # 全局合并路径把 A|1(局部簇0的代表)和 A|2(局部簇1的代表)拉进了同一个
+    # 全局簇(例如二者都与其他基因组的某个代表相似, 经路径③合并到一起),
+    # 此时该全局簇内只涉及单一基因组 A, 但 A|1/A|2 分属不同局部簇,
+    # 二者之间的边之前会被"单基因组簇直接跳过"的旧逻辑漏掉。
+    global_lib = GlobalRepresentativeLibrary(
+        clusters=[
+            GlobalCluster(
+                cluster_id="global|cluster_0",
+                representative_ids={"A|1"},
+                member_ids={"A|1", "A|2"},
+                active=True,
+            )
+        ]
+    )
+    incremental_result = IncrementalResult(
+        global_lib=global_lib,
+        ssn_edges=set(),
+    )
+
+    aligner = MockAligner()
+    align_calls = {"n": 0}
+    original_align = aligner.align_query_vs_subject
+
+    def _counting_align(query, subject):
+        align_calls["n"] += 1
+        return original_align(query, subject)
+
+    monkeypatch.setattr(aligner, "align_query_vs_subject", _counting_align)
+
+    stage = SSNBuilderStage(aligner=aligner, edge_completion_mode="full")
+    result = stage.run(genomes, intra_results, incremental_result)
+
+    actual_pairs = {frozenset((e.source, e.target)) for e in result.edges}
+    # 修复后: A|1-A|2 这条"同基因组跨局部簇"边应被补齐
+    assert frozenset(("A|1", "A|2")) in actual_pairs
+    # 补边直接查表复用, 不应触发任何新比对调用(簇内只有 A 这一个基因组,
+    # 跨基因组比对逻辑不会被触发)
+    assert align_calls["n"] == 0
