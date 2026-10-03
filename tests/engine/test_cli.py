@@ -134,7 +134,10 @@ def test_run_nonexistent_input_dir_exits_with_error(tmp_path):
     assert not output_dir.exists()
 
 
-def test_run_empty_input_dir_still_succeeds_with_zero_genomes(tmp_path):
+def test_run_empty_input_dir_exits_with_error(tmp_path):
+    """工程审查问题6(2026-10-03 与用户确认): 输入目录下未发现任何 FASTA
+    文件时应直接报错退出, 而不是"成功"产出一份空结果(此前的行为)。
+    """
     input_dir = tmp_path / "genomes"
     input_dir.mkdir()
     output_dir = tmp_path / "out"
@@ -143,9 +146,8 @@ def test_run_empty_input_dir_still_succeeds_with_zero_genomes(tmp_path):
         app, ["run", "-i", str(input_dir), "-o", str(output_dir)]
     )
 
-    assert result.exit_code == 0
-    summary = json.loads((output_dir / "load_summary.json").read_text(encoding="utf-8"))
-    assert summary["total_genomes"] == 0
+    assert result.exit_code == 1
+    assert not (output_dir / "load_summary.json").exists()
 
 
 def test_run_writes_intra_summary_for_loaded_genomes(tmp_path):
@@ -638,6 +640,30 @@ def test_run_append_nonexistent_dir_exits_with_error(tmp_path):
         ],
     )
     assert result.exit_code != 0
+
+
+def test_run_append_empty_dir_exits_with_error(tmp_path):
+    """工程审查问题6(2026-10-03 与用户确认): -a/--append 指向的目录下未
+    发现任何 FASTA 文件时应直接报错退出, 而不是"成功"但实际未追加任何
+    内容(此前的行为)。
+    """
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    first = runner.invoke(app, ["run", "-i", str(input_dir), "-o", str(output_dir)])
+    assert first.exit_code == 0
+
+    append_dir = tmp_path / "append"
+    append_dir.mkdir()
+
+    result = runner.invoke(
+        app, ["run", "-i", str(input_dir), "-o", str(output_dir), "-a", str(append_dir)],
+    )
+    assert result.exit_code == 1
+    load_summary_before = json.loads((output_dir / "load_summary.json").read_text(encoding="utf-8"))
+    assert load_summary_before["total_genomes"] == 1
 
 
 def test_run_append_without_complete_prior_state_exits_with_error(tmp_path):

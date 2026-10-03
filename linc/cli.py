@@ -387,11 +387,15 @@ def run(
 
     genome_files = discover_fasta_files(input_dir)
     if not genome_files:
+        # 工程审查问题6(2026-10-03 与用户确认): 空输入目录此前只打 warning
+        # 后继续执行整个 pipeline, 最终产出空的 Orthogroups.txt, 容易让
+        # 用户误以为流程正常完成; 改为直接报错退出。
         typer.secho(
             f"输入目录下未发现任何 FASTA 文件(*.fasta/*.fa/*.faa): {input_dir}",
-            fg=typer.colors.YELLOW,
+            fg=typer.colors.RED,
             err=True,
         )
+        raise typer.Exit(code=1)
 
     try:
         aligner = _build_aligner(aligner_backend, threads, output_dir)
@@ -501,6 +505,16 @@ def run(
     try:
         if append_dir is not None:
             new_genome_files = discover_fasta_files(append_dir)
+            if not new_genome_files:
+                # 工程审查问题6(2026-10-03 与用户确认): -a/--append 指向
+                # 空目录(或目录内无受支持的FASTA文件)时, 此前会"成功"退出
+                # 但实际未追加任何内容, 容易让用户误以为追加生效; 改为报错。
+                typer.secho(
+                    f"-a/--append 指向的目录下未发现任何 FASTA 文件"
+                    f"(*.fasta/*.fa/*.faa): {append_dir}",
+                    fg=typer.colors.RED, err=True,
+                )
+                raise typer.Exit(code=1)
             logger.info(
                 "追加模式(--append): 发现 %d 个新基因组候选文件(目录=%s)",
                 len(new_genome_files), append_dir,
