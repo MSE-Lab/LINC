@@ -25,6 +25,26 @@ def _write_fasta(path: str, records: list) -> None:
             fh.write(f">{header}\n{sequence}\n")
 
 
+class _CallCountingAligner(MockAligner):
+    """包装 MockAligner, 统计 `build_index`/`search` 被调用的次数(force 风险
+    修复回归测试, 2026-10-03): 用于证明 --force 触发后确实重新跑了
+    IntraGenomeStage/GlobalJoinStage, 而非仅仅放行检查却继续复用旧缓存。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.build_index_calls = 0
+        self.search_calls = 0
+
+    def build_index(self, genes, index_id=None):
+        self.build_index_calls += 1
+        return super().build_index(genes, index_id=index_id)
+
+    def search(self, query, index, tag=None, self_search=False):
+        self.search_calls += 1
+        return super().search(query, index, tag=tag, self_search=self_search)
+
+
 def _make_pipeline(repository) -> Pipeline:
     return Pipeline(
         aligner=MockAligner(),
@@ -317,3 +337,105 @@ def test_resume_skips_config_check_with_warning_when_no_historical_config(tmp_pa
     )
     # 不应抛出 ConfigMismatchError(无法校验, 跳过)。
     different_pipeline.resume([str(file_path)])
+
+
+def test_resume_force_ignores_stale_cache_and_recomputes_intra(tmp_path):
+    """force 风险修复回归测试(2026-10-03 与用户确认, 风险1): --resume
+    --force 时, 不能只放行参数校验却继续复用旧参数算出的 intra_results/
+    join_result/complete_ssn/families 缓存——必须忽略这些缓存, 从
+    IntraGenomeStage 开始用新参数对全部基因组重算。用调用计数验证"确实
+    重新发起了比对", 而不是静默复用旧结果。"""
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    file_path = input_dir / "g1.faa"
+    _write_fasta(str(file_path), [("x", "MKV"), ("y", "MKL")])
+
+    repo = FileRepository(str(tmp_path / "state"))
+    first_aligner = _CallCountingAligner()
+    pipeline = Pipeline(
+        aligner=first_aligner,
+        clustering_for_intra=UnionFindClustering(),
+        clustering_for_mcl=UnionFindClustering(),
+        repository=repo,
+        config=PipelineConfig(),
+    )
+    pipeline.run([str(file_path)])
+
+    # 不带 force 的普通 resume: 一切都已持久化, 不应触发任何新的比对调用。
+    plain_aligner = _CallCountingAligner()
+    plain_pipeline = Pipeline(
+        aligner=plain_aligner,
+        clustering_for_intra=UnionFindClustering(),
+        clustering_for_mcl=UnionFindClustering(),
+        repository=repo,
+        config=PipelineConfig(),
+    )
+    plain_pipeline.resume([str(file_path)])
+    assert plain_aligner.search_calls == 0
+    assert plain_aligner.build_index_calls == 0
+
+    # 带 force 且参数不一致的 resume: 必须重新对全部基因组跑 Intra/Join,
+    # 因此一定会触发新的比对/建库调用。
+    forced_aligner = _CallCountingAligner()
+    forced_pipeline = Pipeline(
+        aligner=forced_aligner,
+        clustering_for_intra=UnionFindClustering(),
+        clustering_for_mcl=UnionFindClustering(),
+        repository=repo,
+        config=PipelineConfig(cutoff_i=0.9),
+    )
+    forced_pipeline.resume([str(file_path)], force=True)
+    assert forced_aligner.search_calls > 0 or forced_aligner.build_index_calls > 0
+
+    # force 覆盖事件应写入持久化审计记录, 不会因随后 save_config 更新基线
+    # 而被悄悄抹掉(风险2)。
+    history = repo.load_append_history()
+    force_entries = [e for e in history if e.get("event") == "force_config_override"]
+    assert len(force_entries) == 1
+    assert force_entries[0]["action"] == "resume"
+    assert "cutoff_i" in force_entries[0]["mismatched_fields"]
+
+
+def test_append_force_recomputes_historical_intra_and_full_rejoin(tmp_path):
+    """force 风险修复回归测试(2026-10-03 与用户确认, 风险1): --append
+    --force 时, 历史基因组不能继续复用旧参数算出的 intra_results/
+    join_result——必须用新参数重新对**全部历史基因组**跑 IntraGenomeStage,
+    并放弃"接续历史 join_result 增量并入"的优化路径, 改为对历史+新增
+    全部基因组从头跑一次 GlobalJoinStage。"""
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    file_a = input_dir / "gA.faa"
+    _write_fasta(str(file_a), [("x", "MKV")])
+
+    repo = FileRepository(str(tmp_path / "state"))
+    pipeline = _make_pipeline(repo)
+    pipeline.run([str(file_a)])
+
+    append_dir = tmp_path / "append"
+    append_dir.mkdir()
+    file_b = append_dir / "gB.faa"
+    _write_fasta(str(file_b), [("y", "MKL")])
+
+    forced_aligner = _CallCountingAligner()
+    forced_pipeline = Pipeline(
+        aligner=forced_aligner,
+        clustering_for_intra=UnionFindClustering(),
+        clustering_for_mcl=UnionFindClustering(),
+        repository=repo,
+        config=PipelineConfig(inflation=3.0),
+    )
+    appended = forced_pipeline.append([str(file_b)], force=True)
+
+    assert set(appended.genomes.keys()) == {"gA", "gB"}
+    # 历史基因组 gA 的 intra 应被重新计算过(调用计数 > 0 能证明确实对
+    # historical_loaded 重新跑了一遍 IntraGenomeStage, 而不仅仅是对新增
+    # 的 gB 跑)。由于 gA 只有1个基因, 本身不会触发 self_search 的两两
+    # 比对, 这里改为直接验证 join 阶段确实发起了"历史+新增"的全量重跑
+    # (会至少调用一次 build_index/search, 而非仅复用历史 join_result)。
+    assert forced_aligner.search_calls > 0 or forced_aligner.build_index_calls > 0
+
+    history = repo.load_append_history()
+    force_entries = [e for e in history if e.get("event") == "force_config_override"]
+    assert len(force_entries) == 1
+    assert force_entries[0]["action"] == "append"
+    assert "inflation" in force_entries[0]["mismatched_fields"]

@@ -143,13 +143,24 @@ class Pipeline:
                 ".linc_work 后重新执行一次完整的 `linc run`。"
             )
 
-    def _check_config_consistency(self, force: bool) -> None:
+    def _check_config_consistency(self, force: bool, action: str) -> bool:
         """校验本次算法参数(`self._config`)与历史持久化的参数是否一致
-        (工程审查问题1, 2026-10-03 与用户确认)。
+        (工程审查问题1, 2026-10-03 与用户确认; force 风险修复, 2026-10-03
+        与用户再次确认)。
 
         历史 state 不存在 `config.pkl`(本次改动之前写入的旧版 state)时,
         视为"无法校验", 只打印 warning 并放行(与 `input_signature` 旧格式
-        兼容处理的既有原则一致), 不阻断 resume/append。
+        兼容处理的既有原则一致), 不阻断 resume/append, 返回 `False`
+        (不视为"发生了不一致", 不触发调用方的强制重算逻辑)。
+
+        返回值 `mismatched: bool` 表示"本次是否检测到参数不一致(无论是否
+        因 --force 被放行)"。调用方(`resume`/`append`)必须在 `mismatched`
+        为 `True` 时, 忽略任何已持久化的 intra_results/join_result/
+        complete_ssn/families 缓存, 强制用本次(新)参数从 IntraGenomeStage
+        开始对全部历史基因组重新计算——否则 --force 只是放行了检查、却仍
+        然复用旧参数算出的缓存, 产出会在同一次结果里悄悄混用新旧参数
+        (风险1)。force 覆盖事件会写入 `append_audit_log` 持久化留痕, 不会
+        因为随后 `save_config()` 更新基线而被悄悄抹掉(风险2)。
         """
         historical_config = self._repository.load_config()
         if historical_config is None:
@@ -157,7 +168,7 @@ class Pipeline:
                 "历史 state 中未找到算法参数记录(config.pkl), 可能是本次改动"
                 "之前写入的旧版 state, 无法校验参数一致性, 已跳过该项校验。"
             )
-            return
+            return False
         current_config = asdict(self._config)
         mismatched = {
             key: (historical_config.get(key), current_config[key])
@@ -165,22 +176,37 @@ class Pipeline:
             if historical_config.get(key) != current_config[key]
         }
         if not mismatched:
-            return
+            return False
         detail = "; ".join(
             f"{key}: 历史={hist!r}, 本次={cur!r}"
             for key, (hist, cur) in sorted(mismatched.items())
         )
         if force:
             logger.warning(
-                "检测到算法参数与历史运行不一致, 但已指定 --force, 将继续执行"
-                "(可能产出新旧参数混搭的结果): %s", detail,
+                "检测到算法参数与历史运行不一致, 但已指定 --force, 将忽略"
+                "已持久化的 intra_results/join_result/complete_ssn/families "
+                "缓存, 用本次新参数对全部历史基因组从 IntraGenomeStage 开始"
+                "强制重算(等同于一次接近完整的重跑, 比普通 resume/append 慢)"
+                ", 以避免新旧参数混搭: %s", detail,
             )
-            return
+            self._repository.append_audit_log(
+                {
+                    "timestamp": datetime.now().isoformat(),
+                    "event": "force_config_override",
+                    "action": action,
+                    "mismatched_fields": {
+                        key: {"historical": hist, "current": cur}
+                        for key, (hist, cur) in mismatched.items()
+                    },
+                }
+            )
+            return True
         raise ConfigMismatchError(
             f"--resume/--append 失败: 本次算法参数与历史运行不一致: {detail}; "
             "直接续跑会产出新旧参数混搭的不一致结果。若确认要覆盖继续, 请加 "
-            "--force 显式确认(风险自负); 否则请保持参数与历史一致, 或删除 "
-            "-o 目录下的 .linc_work 后重新执行一次完整的 `linc run`。"
+            "--force 显式确认(会强制从 IntraGenomeStage 开始对全部历史基因组"
+            "重算, 风险自负); 否则请保持参数与历史一致, 或删除 -o 目录下的 "
+            ".linc_work 后重新执行一次完整的 `linc run`。"
         )
 
     @staticmethod
@@ -318,11 +344,13 @@ class Pipeline:
         本方法内部不再重复校验, 专注于"从哪个 Stage 接着跑")。
 
         `force`: 若本次算法参数与历史持久化的参数不一致, 默认抛出
-        `ConfigMismatchError`; 传入 `force=True` 则仅记 warning 后继续执行
-        (工程审查问题1, 2026-10-03 与用户确认)。
+        `ConfigMismatchError`; 传入 `force=True` 则记 warning + 持久化审计
+        记录后继续执行, 并强制忽略所有已持久化的 Stage 缓存、从
+        IntraGenomeStage 开始用新参数对全部基因组重算(工程审查问题1,
+        2026-10-03 与用户确认; force 风险修复, 2026-10-03 与用户再次确认)。
         """
         repo = self._repository
-        self._check_config_consistency(force=force)
+        forced_override = self._check_config_consistency(force=force, action="resume")
         repo.save_config(asdict(self._config))
 
         if repo.has_genomes():
@@ -333,30 +361,35 @@ class Pipeline:
 
         loaded_genomes = self._loaded_only(genomes)
 
-        if repo.has_intra_results():
-            intra_results = repo.load_intra_results()
-            self._check_genome_indexes(intra_results)
-        else:
+        # force 风险修复(2026-10-03 与用户确认, 风险1): 一旦检测到参数不
+        # 一致且用户显式 --force, 不能再信任任何已持久化的 intra_results/
+        # join_result/complete_ssn/families 缓存(它们可能是用旧参数算出的)
+        # ——必须强制忽略缓存, 从 IntraGenomeStage 开始用本次新参数对全部
+        # 历史基因组重新计算, 避免同一次产出里混用新旧参数。
+        if forced_override or not repo.has_intra_results():
             intra_results = self._run_intra(loaded_genomes)
             repo.save_intra_results(intra_results)
-
-        if repo.has_join_result():
-            join_result = repo.load_join_result()
         else:
+            intra_results = repo.load_intra_results()
+            self._check_genome_indexes(intra_results)
+
+        if forced_override or not repo.has_join_result():
             join_result = self._run_join(loaded_genomes, intra_results)
             repo.save_join_result(join_result)
-
-        if repo.has_complete_ssn():
-            complete_ssn = repo.load_complete_ssn()
         else:
+            join_result = repo.load_join_result()
+
+        if forced_override or not repo.has_complete_ssn():
             complete_ssn = self._run_ssn(loaded_genomes, intra_results, join_result)
             repo.save_complete_ssn(complete_ssn)
-
-        if repo.has_families():
-            families = repo.load_families()
         else:
+            complete_ssn = repo.load_complete_ssn()
+
+        if forced_override or not repo.has_families():
             families = self._run_family(complete_ssn, intra_results)
             repo.save_families(families)
+        else:
+            families = repo.load_families()
 
         return PipelineResult(
             genomes=genomes,
@@ -378,11 +411,14 @@ class Pipeline:
           全量重跑(不做增量优化, 保证正确性优先)。
 
         `force`: 若本次算法参数与历史持久化的参数不一致, 默认抛出
-        `ConfigMismatchError`; 传入 `force=True` 则仅记 warning 后继续执行
-        (工程审查问题1, 2026-10-03 与用户确认)。
+        `ConfigMismatchError`; 传入 `force=True` 则记 warning + 持久化审计
+        记录后继续执行, 并强制对**全部历史基因组**用新参数重算
+        IntraGenomeStage、放弃增量并入优化、从头对全部基因组重跑
+        GlobalJoinStage(工程审查问题1, 2026-10-03 与用户确认; force 风险
+        修复, 2026-10-03 与用户再次确认)。
         """
         repo = self._repository
-        self._check_config_consistency(force=force)
+        forced_override = self._check_config_consistency(force=force, action="append")
         repo.save_config(asdict(self._config))
 
         historical_genomes = repo.load_genomes()
@@ -398,16 +434,29 @@ class Pipeline:
         new_intra_results = self._run_intra(new_loaded)
 
         merged_genomes = {**historical_genomes, **new_genomes}
-        merged_intra_results = {**historical_intra, **new_intra_results}
         merged_loaded = self._loaded_only(merged_genomes)
 
-        join_result = self._run_join(
-            new_loaded,
-            new_intra_results,
-            initial_global_lib=historical_join.global_lib,
-            initial_ssn_edges=historical_join.ssn_edges,
-            initial_cluster_counter=historical_join.cluster_counter,
-        )
+        # force 风险修复(2026-10-03 与用户确认, 风险1): append 场景下
+        # `historical_intra`/`historical_join` 是用"历史参数"算出的, 若
+        # 本次参数不一致且用户 --force 放行, 不能让历史基因组继续复用旧
+        # 参数产出——必须用新参数对**全部历史基因组**重新跑 IntraGenomeStage,
+        # 并放弃"接续历史 join_result 增量并入"的优化路径, 改为对
+        # "历史+新增"全部基因组从头跑一次 GlobalJoinStage, 避免新旧参数在
+        # 同一次产出里混搭。
+        if forced_override:
+            historical_loaded = self._loaded_only(historical_genomes)
+            historical_intra = self._run_intra(historical_loaded)
+            merged_intra_results = {**historical_intra, **new_intra_results}
+            join_result = self._run_join(merged_loaded, merged_intra_results)
+        else:
+            merged_intra_results = {**historical_intra, **new_intra_results}
+            join_result = self._run_join(
+                new_loaded,
+                new_intra_results,
+                initial_global_lib=historical_join.global_lib,
+                initial_ssn_edges=historical_join.ssn_edges,
+                initial_cluster_counter=historical_join.cluster_counter,
+            )
 
         complete_ssn = self._run_ssn(merged_loaded, merged_intra_results, join_result)
         families = self._run_family(complete_ssn, merged_intra_results)

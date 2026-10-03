@@ -702,7 +702,7 @@ def test_run_resume_with_different_cutoff_and_force_succeeds(tmp_path):
         app,
         [
             "run", "-i", str(input_dir), "-o", str(output_dir), "--resume",
-            "--cutoff-i", "0.9", "--force",
+            "--cutoff-i", "0.9", "--cutoff-ii", "0.95", "--force",
         ],
     )
     assert result.exit_code == 0
