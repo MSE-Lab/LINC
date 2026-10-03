@@ -822,10 +822,7 @@ def pan(
         help="Output directory for the pan-genome analysis result files.",
     ),
 ) -> None:
-    """Pan-genome analysis based on Orthogroups.txt + gene_genome.tsv: computes
-    the presence/absence matrix, classifies each orthogroup into
-    core/soft-core/shell/cloud/singleton, and breaks down gene counts per
-    genome by category."""
+    """Pan-genome analysis based on Orthogroups.txt + gene_genome.tsv: computes the presence/absence matrix, classifies each orthogroup into core/soft-core/shell/cloud/singleton, and breaks down gene counts per genome by category."""
     _setup_logging(False)
 
     if not os.path.isfile(orthogroups_path):
