@@ -216,3 +216,59 @@ FamilyRefineStage(用归一化权重构图 → MCL)
 | 6 | CLI:`--edge-weight-mode normalized_bitscore` + 可选参数 | 步骤 2 |
 | 7 | 单测:拟合数值正确性、回退逻辑、append 复用 | 步骤 1-6 |
 | 8 | 基准:`compare_orthofinder.py` 验证 F1 增益 + 消融 | 步骤 1-6 |
+
+---
+
+## 10. 推进建议(评审结论, 2026-10-03 追加)
+
+### 10.1 核实结论
+
+对照现有代码(`SSNEdge`/`CompleteSSN`/`FamilyRefineStage`/`Pipeline`/`FileRepository`)逐条核实后,
+本方案**技术上可行**, 与现有代码结构吻合度较高, 未发现"方案在当前代码库下走不通"的硬伤:
+
+- `SSNEdge` 已预留 `bitscore`/`source_length`/`target_length` 字段, 注释明确写着"为未来 MCL
+  权重归一化(如 OrthoFinder 式长度校正)预留", 上游阶段无需改动;
+- `SSNEdge.weight(mode, alpha)` + `VALID_EDGE_WEIGHT_MODES` 的既有扩展机制可直接复用, 新增
+  `normalized_bitscore` 只是多加一个分支, 但需要扩展 `weight()` 签名以传入 per-pair 的 `(a, b)`,
+  这是唯一一处需要修改既有接口签名的地方, 实现时要重点关注调用方
+  (`FamilyRefineStage` 的 `edge.weight(self._edge_weight_mode, self._edge_weight_alpha)`)
+  怎么拿到并传入 `(a, b)`;
+- `Pipeline._run_ssn`/`_run_family` 在 `run()`/`resume()`/`append()` 中紧邻调用, 插入点位置准确,
+  且 `loaded_genomes` 在该作用域内可直接取到, 构建 `gene_to_genome` 映射无需改动上游;
+- `Genome.genome_id` 现为内部短编号(`G00001`...), `append` 场景下历史基因组 `genome_id` 不变,
+  "按 `(genome_a, genome_b)` 存取 `(a, b)`, 历史 pair 不受影响"的增量设计站得住脚;
+- `np.polyfit(log10(Lf), log10(S), 1)` 与 OrthoFinder `curve_fit` 拟合同一个线性模型数学等价,
+  用 numpy 代替 scipy 没有问题;
+- `_check_config_consistency` 已有 `non_semantic_fields = {"threads"}` 机制, "评估拟合参数是否归入
+  `non_semantic_fields`"可直接复用该机制。
+
+### 10.2 编码前需要明确/补强的点
+
+1. **第8节两个开放问题需要先用数据验证, 不能假设结论**: top-95% 分 bin 去噪是 OrthoFinder 认为
+   的"去噪关键", 若 MVP 省略, 有可能导致 F1 提升不如预期; 拟合用 SSN 边还是 full 阶段原始 hits
+   同理需要实测对比, 不能直接假设"SSN 边已经足够"。
+2. **`_MIN_HITS_PER_PAIR` 回退阈值需结合真实数据校验**: 若较多 genome pair 因边数不足触发回退
+   (`a=0.5, b=0`), 方案会退化为"长度几何平均归一化", 实际收益打折; 验证阶段应统计"回退触发比例"
+   作为是否真正生效的指标, 不能只看最终 F1。
+3. **bitscore 方向性约定需在实现时保持一致**: `source_length`/`target_length` 的 query/subject
+   身份按 `genome_id` 字典序单向固定(人为约定, 非双向对称值); 拟合 `fit_pair` 的 `Lq_list`/
+   `Lh_list` 取值必须与归一化计算权重时的 `Lq`/`Lh` 角色严格对应, 建议单测专门覆盖这一致性。
+4. **新增 CLI 参数(`--norm-min-hits`/`--norm-top-percentile`)需补充参数校验**, 并明确是否纳入
+   `_check_config_consistency` 的历史一致性比较。
+
+### 10.3 建议的推进顺序
+
+**第一步: 先离线脚本验证收益, 再决定是否写入 pipeline。**
+不改动 `linc/` 生产代码, 先写一个独立脚本(类似 `benchmark/compare_orthofinder.py` 旁边新增),
+直接读取已有的 `CompleteSSN`/中间产出, 离线做 `(a, b)` 拟合 + 重算权重 + 重跑 MCL, 对比 family F1。
+同时把第8节两个开放问题的消融一并做完(分 bin vs 不分 bin; 只拟合 a vs a+b 全拟合, 共4种组合),
+确认哪种组合收益最大、复杂度是否值得, 并记录 `_MIN_HITS_PER_PAIR` 回退触发比例、`(a, b)` 分布。
+
+**第二步: 根据验证数据决定最终方案形态。**
+若"不分 bin"已能拿到大部分收益, 维持 MVP 从简思路; 若收益明显打折, 分 bin 逻辑需直接写入 MVP、
+不能留作可选项, 相应需重新评估工作量。
+
+**第三步: 验证达到预期后才进入正式编码(按第9节实现清单)。**
+只有确认"归一化确实能收窄与 OrthoFinder 的 gap", 才值得改动生产代码(`SSNEdge.weight()` 签名、
+新增 `score_normalizer.py`、接入 `Pipeline`/`FileRepository`/CLI, 可能再次递增 `SCHEMA_VERSION`)。
+涉及接口签名变化、持久化字段变化等"大方案层面"决策, 仍需先说明方案并等待确认后再动手实现。
