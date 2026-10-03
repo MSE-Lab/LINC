@@ -217,6 +217,162 @@ def _write_gene_genome_tsv(genomes: dict, path: str) -> None:
                 fh.write(f"{header}\t{genome.source_file_name}\n")
 
 
+def _load_gene_genome_map(path: str) -> dict:
+    """解析 gene_genome.tsv(每行"原始序列ID\t基因组名"), 返回
+    {原始序列ID: 基因组名} 映射。"""
+    mapping = {}
+    with open(path, "r", encoding="utf-8") as fh:
+        for line_no, line in enumerate(fh, start=1):
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            parts = line.split("\t")
+            if len(parts) != 2:
+                typer.secho(
+                    f"gene_genome.tsv 第 {line_no} 行格式异常(应为两列, "
+                    f"实际为 {len(parts)} 列): {line!r}",
+                    fg=typer.colors.RED, err=True,
+                )
+                raise typer.Exit(code=1)
+            gene_original_id, genome_name = parts
+            mapping[gene_original_id] = genome_name
+    return mapping
+
+
+def _parse_orthogroups_txt(path: str) -> list:
+    """解析 Orthogroups.txt(每行"family_id\\tmember1 member2 ..."),
+    返回 [(family_id, [原始序列ID, ...]), ...]。"""
+    families = []
+    with open(path, "r", encoding="utf-8") as fh:
+        for line_no, line in enumerate(fh, start=1):
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            parts = line.split("\t")
+            if len(parts) != 2:
+                typer.secho(
+                    f"Orthogroups.txt 第 {line_no} 行格式异常(应为两列, "
+                    f"实际为 {len(parts)} 列): {line!r}",
+                    fg=typer.colors.RED, err=True,
+                )
+                raise typer.Exit(code=1)
+            family_id, members_str = parts
+            members = members_str.split()
+            families.append((family_id, members))
+    return families
+
+
+def _classify_family(n_genomes_present: int, n_total_genomes: int, n_members: int) -> str:
+    """按用户确认的规则对一个直系同源家族(OG)分类:
+    - 家族总成员数为 1(即只出现在 1 个基因组且该基因组内只有 1 条基因,
+      无任何同源序列) -> singleton, 优先于下面的比例判断。
+    - 否则按"覆盖的基因组数 / 总基因组数"的比例:
+      >=99% -> core | [95%, 99%) -> soft-core |
+      [15%, 95%) -> shell | <15% -> cloud。
+    """
+    if n_members == 1:
+        return "singleton"
+    ratio = n_genomes_present / n_total_genomes
+    if ratio >= 0.99:
+        return "core"
+    if ratio >= 0.95:
+        return "soft-core"
+    if ratio >= 0.15:
+        return "shell"
+    return "cloud"
+
+
+_PAN_CATEGORIES = ["core", "soft-core", "shell", "cloud", "singleton"]
+
+
+def _build_pan_genome_data(families: list, gene_to_genome: dict, genome_names: list) -> dict:
+    """基于已解析的 Orthogroups 与 gene->genome 映射, 一次性计算:
+    - presence_absence: {family_id: {genome_name: copy_number}}
+    - family_category: {family_id: category}
+    - genome_breakdown: {genome_name: {category: gene_count}}
+    """
+    n_total_genomes = len(genome_names)
+    presence_absence = {}
+    family_category = {}
+    genome_breakdown = {
+        genome_name: {category: 0 for category in _PAN_CATEGORIES}
+        for genome_name in genome_names
+    }
+
+    for family_id, members in families:
+        copy_counts = {}
+        unknown_members = []
+        for original_id in members:
+            genome_name = gene_to_genome.get(original_id)
+            if genome_name is None:
+                unknown_members.append(original_id)
+                continue
+            copy_counts[genome_name] = copy_counts.get(genome_name, 0) + 1
+        if unknown_members:
+            typer.secho(
+                f"警告: Orthogroups.txt 中家族 {family_id} 的以下序列 ID "
+                f"在 gene_genome.tsv 中未找到对应基因组, 已忽略: "
+                f"{unknown_members}",
+                fg=typer.colors.YELLOW, err=True,
+            )
+
+        presence_absence[family_id] = copy_counts
+        n_genomes_present = len(copy_counts)
+        n_members = sum(copy_counts.values())
+        category = _classify_family(n_genomes_present, n_total_genomes, n_members)
+        family_category[family_id] = category
+
+        for genome_name, count in copy_counts.items():
+            genome_breakdown[genome_name][category] += count
+
+    return {
+        "presence_absence": presence_absence,
+        "family_category": family_category,
+        "genome_breakdown": genome_breakdown,
+    }
+
+
+def _write_presence_absence_matrix(
+    presence_absence: dict, genome_names: list, path: str
+) -> None:
+    """输出 presence_absence_matrix.tsv: 行=family_id, 列=各基因组名,
+    值=该家族在该基因组中的基因拷贝数(整数, 0 表示缺失)。"""
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("Orthogroup\t" + "\t".join(genome_names) + "\n")
+        for family_id in sorted(presence_absence.keys()):
+            copy_counts = presence_absence[family_id]
+            row = [str(copy_counts.get(genome_name, 0)) for genome_name in genome_names]
+            fh.write(f"{family_id}\t" + "\t".join(row) + "\n")
+
+
+def _write_pan_genome_summary(family_category: dict, path: str) -> None:
+    """输出 pan_genome_summary.tsv: 按分类列出 OG 数量及占比。"""
+    total = len(family_category)
+    counts = {category: 0 for category in _PAN_CATEGORIES}
+    for category in family_category.values():
+        counts[category] += 1
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("Category\tN_orthogroups\tPercentage\n")
+        for category in _PAN_CATEGORIES:
+            n = counts[category]
+            pct = (n / total * 100) if total else 0.0
+            fh.write(f"{category}\t{n}\t{pct:.2f}%\n")
+
+
+def _write_per_genome_breakdown(
+    genome_breakdown: dict, genome_names: list, path: str
+) -> None:
+    """输出 per_genome_breakdown.tsv: 每行一个基因组, 列为 core/soft-core/
+    shell/cloud/singleton 五类的基因数(该基因组内属于该分类家族的基因数,
+    而非家族个数)。"""
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("Genome\t" + "\t".join(_PAN_CATEGORIES) + "\n")
+        for genome_name in genome_names:
+            counts = genome_breakdown[genome_name]
+            row = [str(counts[category]) for category in _PAN_CATEGORIES]
+            fh.write(f"{genome_name}\t" + "\t".join(row) + "\n")
+
+
 def _build_intra_summary(intra_results: dict) -> dict:
     total_genes = sum(r.n_genes for r in intra_results.values())
     total_representatives = sum(r.n_representatives for r in intra_results.values())
@@ -649,6 +805,70 @@ def run(
         typer.echo(f"基因-基因组对照表已写入: {gene_genome_path}")
     finally:
         lock_cm.__exit__(None, None, None)
+
+
+@app.command()
+def pan(
+    orthogroups_path: str = typer.Option(
+        ..., "-g", "--orthogroups",
+        help="Path to Orthogroups.txt (as produced by `linc run`).",
+    ),
+    gene_genome_path: str = typer.Option(
+        ..., "-m", "--gene-genome",
+        help="Path to gene_genome.tsv (as produced by `linc run`).",
+    ),
+    output_dir: str = typer.Option(
+        "output", "-o", "--output-dir",
+        help="Output directory for the pan-genome analysis result files.",
+    ),
+) -> None:
+    """Pan-genome analysis based on Orthogroups.txt + gene_genome.tsv: computes
+    the presence/absence matrix, classifies each orthogroup into
+    core/soft-core/shell/cloud/singleton, and breaks down gene counts per
+    genome by category."""
+    _setup_logging(False)
+
+    if not os.path.isfile(orthogroups_path):
+        typer.secho(
+            f"未找到 Orthogroups.txt 文件: {orthogroups_path}",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+    if not os.path.isfile(gene_genome_path):
+        typer.secho(
+            f"未找到 gene_genome.tsv 文件: {gene_genome_path}",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+
+    gene_to_genome = _load_gene_genome_map(gene_genome_path)
+    genome_names = sorted(set(gene_to_genome.values()))
+    if not genome_names:
+        typer.secho(
+            f"gene_genome.tsv 中未解析到任何基因组: {gene_genome_path}",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+
+    families = _parse_orthogroups_txt(orthogroups_path)
+
+    pan_data = _build_pan_genome_data(families, gene_to_genome, genome_names)
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    matrix_path = os.path.join(output_dir, "presence_absence_matrix.tsv")
+    _write_presence_absence_matrix(pan_data["presence_absence"], genome_names, matrix_path)
+
+    summary_path = os.path.join(output_dir, "pan_genome_summary.tsv")
+    _write_pan_genome_summary(pan_data["family_category"], summary_path)
+
+    breakdown_path = os.path.join(output_dir, "per_genome_breakdown.tsv")
+    _write_per_genome_breakdown(pan_data["genome_breakdown"], genome_names, breakdown_path)
+
+    typer.echo(f"泛基因组分析完成: 共 {len(families)} 个直系同源家族, {len(genome_names)} 个基因组")
+    typer.echo(f"存在/缺失矩阵已写入: {matrix_path}")
+    typer.echo(f"分类汇总已写入: {summary_path}")
+    typer.echo(f"各基因组分解表已写入: {breakdown_path}")
 
 
 if __name__ == "__main__":
