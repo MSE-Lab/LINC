@@ -481,6 +481,12 @@ def run(
         help="Keep intermediate alignment/clustering files instead of deleting them after use. "
              "Index and state files are always kept regardless of this flag.",
     ),
+    dump_raw_hits: Optional[str] = typer.Option(
+        None, "--dump-raw-hits",
+        help="Debug-only: dump all raw alignment hits (before the identity/coverage cutoff) "
+             "from the join and full-completion stages into this directory, as TSV files "
+             "raw_join_hits.tsv and raw_full_hits.tsv. Does not change any clustering logic.",
+    ),
     force: bool = typer.Option(
         False, "--force",
         help="With --resume/--append, continue (with a warning) even if algorithm parameters "
@@ -700,6 +706,7 @@ def run(
                 edge_weight_alpha=edge_weight_alpha,
                 keep_intermediate=keep_intermediate,
                 threads=threads,
+                dump_raw_hits=dump_raw_hits,
             ),
         )
 

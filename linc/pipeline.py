@@ -92,6 +92,11 @@ class PipelineConfig:
     # 纯性能参数, 不影响算法结果, 已在 `_check_config_consistency` 中排除,
     # 不参与 resume/append 的参数一致性校验(修改线程数不应触发强制重算)。
     threads: int = 0
+    # 调试出口(2026-10-03 与用户确认): 非空时, GlobalJoinStage/SSNBuilderStage
+    # 会把 cutoff 过滤之前的全部原始比对 hit(含低 identity 的)落盘到该目录,
+    # 供离线 RBB 等验证脚本使用。纯调试参数, 不改变任何算法逻辑, 不影响结果,
+    # 已加入 non_semantic_fields, 不参与 resume/append 的参数一致性校验。
+    dump_raw_hits: Optional[str] = None
 
 
 @dataclass
@@ -178,7 +183,7 @@ class Pipeline:
         # 工程审查问题9(2026-10-03 与用户确认): `threads` 是纯性能参数
         # (传给 mcl 的 `-te` 线程数), 不影响算法结果, 修改它不应被视为
         # "参数不一致"而触发 ConfigMismatchError/强制重算。
-        non_semantic_fields = {"threads"}
+        non_semantic_fields = {"threads", "dump_raw_hits"}
         mismatched = {
             key: (historical_config.get(key), current_config[key])
             for key in current_config
@@ -262,6 +267,7 @@ class Pipeline:
             cov_mode=config.cov_mode,
             max_per_cluster=config.max_per_cluster,
             cleanup_intermediate=not config.keep_intermediate,
+            dump_raw_hits=config.dump_raw_hits,
         )
         return join_stage.run(
             loaded_genomes,
@@ -286,6 +292,7 @@ class Pipeline:
             cutoff_c=config.cutoff_c,
             cov_mode=config.cov_mode,
             cleanup_intermediate=not config.keep_intermediate,
+            dump_raw_hits=config.dump_raw_hits,
         )
         return ssn_stage.run(loaded_genomes, intra_results, join_result)
 

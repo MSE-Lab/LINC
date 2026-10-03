@@ -40,6 +40,7 @@
        identity < cutoff_i 的弱边改变 MCL 细分阶段看到的权重分布。
 """
 import logging
+import os
 from typing import Dict, List, Optional, Set
 
 from ..core.entities import (
@@ -75,6 +76,7 @@ class SSNBuilderStage:
         cutoff_c: float = 0.5,
         cov_mode: int = COV_MODE_BIDIRECTIONAL,
         cleanup_intermediate: bool = True,
+        dump_raw_hits: Optional[str] = None,
     ) -> None:
         self._aligner = aligner
         self._edge_completion_mode = edge_completion_mode
@@ -91,6 +93,9 @@ class SSNBuilderStage:
         self._cutoff_i = cutoff_i
         self._cutoff_c = cutoff_c
         self._cov_mode = cov_mode
+        # 调试出口(2026-10-03 与用户确认): 非空时把 full 补边阶段 cutoff 过滤
+        # 前的全部原始跨基因组 hit 落盘到该目录, 供离线 RBB 验证使用。
+        self._dump_raw_hits = dump_raw_hits
 
     def run(
         self,
@@ -369,6 +374,8 @@ class SSNBuilderStage:
                 ]
                 hits = self._aligner.align_query_vs_subject(query_genes, subject_genes)
 
+            self._dump_hits(hits, "full")
+
             for hit in hits:
                 # search 的 target 是整个基因组b的索引, query 可能来自多个
                 # 不同的 source 基因组, 可能命中分属不同簇的无关基因, 只保留
@@ -398,6 +405,24 @@ class SSNBuilderStage:
         if hit.query_id == source_id:
             return hit.query_length, hit.subject_length
         return hit.subject_length, hit.query_length
+
+    def _dump_hits(self, hits: List[AlignmentResult], tag: str) -> None:
+        """把 cutoff 过滤前的全部原始跨基因组 hit 追加落盘(调试出口)。
+
+        列: query_id, subject_id, identity, query_cover, subject_cover,
+        bitscore, query_length, subject_length。用于离线 RBB 等验证脚本。
+        """
+        if not self._dump_raw_hits:
+            return
+        os.makedirs(self._dump_raw_hits, exist_ok=True)
+        path = os.path.join(self._dump_raw_hits, f"raw_{tag}_hits.tsv")
+        with open(path, "a", encoding="utf-8") as fh:
+            for hit in hits:
+                fh.write(
+                    f"{hit.query_id}\t{hit.subject_id}\t{hit.identity}\t"
+                    f"{hit.query_cover}\t{hit.subject_cover}\t{hit.bitscore}\t"
+                    f"{hit.query_length}\t{hit.subject_length}\n"
+                )
 
     @staticmethod
     def _count_cross_genome_pairs(

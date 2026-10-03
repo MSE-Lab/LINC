@@ -15,6 +15,7 @@ docs/LINC_技术框架设计_v2.md 第2.4节"GlobalJoinStage 性能方案"(工�
   簇归属判定/合并触发/代表裁决, 不二次比对。
 """
 import logging
+import os
 from collections import defaultdict
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -56,6 +57,7 @@ class GlobalJoinStage:
         max_per_cluster: int = 5,
         event_bus: Optional[EventBus] = None,
         cleanup_intermediate: bool = True,
+        dump_raw_hits: Optional[str] = None,
     ) -> None:
         self._aligner = aligner
         self._cutoff_i = cutoff_i
@@ -68,6 +70,9 @@ class GlobalJoinStage:
         # 数据管理优化第3项(2026-10-03 与用户确认): search() 落盘的中间文件
         # (search_join/) 结果已转存进 IncrementalResult, 默认用完即删。
         self._cleanup_intermediate = cleanup_intermediate
+        # 调试出口(2026-10-03 与用户确认): 非空时把 cutoff 过滤前的全部原始
+        # 比对 hit 落盘到该目录, 供离线 RBB 验证使用; 不改变任何算法逻辑。
+        self._dump_raw_hits = dump_raw_hits
 
     def run(
         self,
@@ -133,6 +138,24 @@ class GlobalJoinStage:
         )
         return result
 
+    def _dump_hits(self, hits: List[AlignmentResult], tag: str) -> None:
+        """把 cutoff 过滤前的全部原始 hit 追加落盘(调试出口, 不影响算法)。
+
+        列: query_id, subject_id, identity, query_cover, subject_cover,
+        bitscore, query_length, subject_length。用于离线 RBB 等验证脚本。
+        """
+        if not self._dump_raw_hits:
+            return
+        os.makedirs(self._dump_raw_hits, exist_ok=True)
+        path = os.path.join(self._dump_raw_hits, f"raw_{tag}_hits.tsv")
+        with open(path, "a", encoding="utf-8") as fh:
+            for hit in hits:
+                fh.write(
+                    f"{hit.query_id}\t{hit.subject_id}\t{hit.identity}\t"
+                    f"{hit.query_cover}\t{hit.subject_cover}\t{hit.bitscore}\t"
+                    f"{hit.query_length}\t{hit.subject_length}\n"
+                )
+
     @staticmethod
     def _order_d_sort(intra_results: Dict[str, GenomeIntraResult]) -> List[str]:
         """Order-D: (基因总数 ↓, 局部代表数 ↓, genome_id 字典序 ↑)。"""
@@ -167,6 +190,8 @@ class GlobalJoinStage:
                 self._aligner.cleanup_search(intra.genome_index, tag="join")
         else:
             hits = []
+
+        self._dump_hits(hits, "join")
 
         hits_by_gene: Dict[str, List[AlignmentResult]] = defaultdict(list)
         for hit in hits:
