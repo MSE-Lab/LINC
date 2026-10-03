@@ -29,10 +29,11 @@ def test_run_parses_single_valid_genome(tmp_path):
     stage = GenomeLoadStage()
     result = stage.run([str(file_path)])
 
-    assert set(result.keys()) == {"genome01"}
-    genome = result["genome01"]
+    assert set(result.keys()) == {"G00001"}
+    genome = result["G00001"]
     assert genome.status == GenomeStatus.LOADED
-    assert genome.genome_id == "genome01"
+    assert genome.genome_id == "G00001"
+    assert genome.source_file_name == "genome01"
     assert len(genome.genes) == 2
 
 
@@ -42,12 +43,40 @@ def test_gene_id_format_and_sequential_local_id(tmp_path):
 
     stage = GenomeLoadStage()
     result = stage.run([str(file_path)])
-    genome = result["genomeA"]
+    genome = result["G00001"]
 
     gene_ids = [g.gene_id for g in genome.genes]
-    assert gene_ids == ["genomeA|1", "genomeA|2", "genomeA|3"]
+    assert gene_ids == ["G00001|1", "G00001|2", "G00001|3"]
     for gene in genome.genes:
-        assert gene.genome_id == "genomeA"
+        assert gene.genome_id == "G00001"
+
+
+def test_original_header_preserved_on_gene(tmp_path):
+    # 核心修复: Gene 必须保留原始 FASTA header(取首 token), 不再因内部
+    # genome_id/local_id 重编码而丢失原始序列 ID(2026-10-03 与用户确认)。
+    file_path = tmp_path / "genomeA.fasta"
+    _write_fasta(
+        str(file_path),
+        [("protXYZ some description", "MK"), ("protABC", "MKL")],
+    )
+
+    stage = GenomeLoadStage()
+    result = stage.run([str(file_path)])
+    genome = result["G00001"]
+
+    assert [g.original_header for g in genome.genes] == ["protXYZ", "protABC"]
+
+
+def test_duplicate_original_header_logs_warning_but_not_fail(tmp_path, caplog):
+    file_path = tmp_path / "dup.faa"
+    _write_fasta(str(file_path), [("same", "MK"), ("same", "MKL")])
+
+    stage = GenomeLoadStage()
+    result = stage.run([str(file_path)])
+    genome = result["G00001"]
+
+    assert genome.status == GenomeStatus.LOADED
+    assert [g.original_header for g in genome.genes] == ["same", "same"]
 
 
 def test_gene_length_and_sequence_match_fasta_body(tmp_path):
@@ -58,20 +87,37 @@ def test_gene_length_and_sequence_match_fasta_body(tmp_path):
 
     stage = GenomeLoadStage()
     result = stage.run([str(file_path)])
-    gene = result["genomeB"].genes[0]
+    gene = result["G00001"].genes[0]
 
     assert gene.sequence == "MKVLAQST"
     assert gene.length == 8
 
 
-def test_genome_id_extracted_from_filename_without_extension(tmp_path):
+def test_genome_id_is_internal_code_not_filename(tmp_path):
+    # 2026-10-03 与用户确认"方案B": genome_id 不再取自文件名(可能含任意
+    # 字符), 而是内部顺序短编号; 原始文件名保存在 source_file_name。
     file_path = tmp_path / "my_genome_007.faa"
     _write_fasta(str(file_path), [("g", "M")])
 
     stage = GenomeLoadStage()
     result = stage.run([str(file_path)])
 
-    assert "my_genome_007" in result
+    assert set(result.keys()) == {"G00001"}
+    assert result["G00001"].source_file_name == "my_genome_007"
+
+
+def test_multiple_genomes_get_sequential_codes_sorted_by_filename(tmp_path):
+    path_b = tmp_path / "b.faa"
+    path_a = tmp_path / "a.faa"
+    _write_fasta(str(path_a), [("g1", "MK")])
+    _write_fasta(str(path_b), [("g1", "MK")])
+
+    stage = GenomeLoadStage()
+    # 故意乱序传入, 编号分配应与传入顺序无关, 按文件名排序后分配
+    result = stage.run([str(path_b), str(path_a)])
+
+    assert result["G00001"].source_file_name == "a"
+    assert result["G00002"].source_file_name == "b"
 
 
 def test_nonexistent_file_marks_failed_without_raising(tmp_path):
@@ -80,8 +126,9 @@ def test_nonexistent_file_marks_failed_without_raising(tmp_path):
     stage = GenomeLoadStage()
     result = stage.run([missing_path])
 
-    genome = result["does_not_exist"]
+    genome = result["G00001"]
     assert genome.status == GenomeStatus.FAILED
+    assert genome.source_file_name == "does_not_exist"
     assert genome.genes == []
 
 
@@ -92,32 +139,42 @@ def test_empty_file_marks_failed(tmp_path):
     stage = GenomeLoadStage()
     result = stage.run([str(file_path)])
 
-    genome = result["empty"]
+    genome = result["G00001"]
     assert genome.status == GenomeStatus.FAILED
     assert genome.genes == []
 
 
-def test_existing_genome_ids_conflict_raises(tmp_path):
-    # 2026-10-02 第8步(--append): 新文件的 genome_id 若与历史(existing_genome_ids)
-    # 冲突, 应同样视为无法自行消歧的歧义, 直接中断。
+def test_existing_genomes_filename_conflict_raises(tmp_path):
+    # --append 场景: 新文件名若与历史 genomes 的 source_file_name 冲突,
+    # 应同样视为无法自行消歧的歧义, 直接中断。
+    from linc.core.entities import Genome
+
     file_path = tmp_path / "genome01.faa"
     _write_fasta(str(file_path), [("g1", "MK")])
 
+    historical = {"G00001": Genome(genome_id="G00001", file_path="hist.faa", source_file_name="genome01")}
+
     stage = GenomeLoadStage()
     with pytest.raises(GenomeIdConflictError) as exc_info:
-        stage.run([str(file_path)], existing_genome_ids={"genome01"})
+        stage.run([str(file_path)], existing_genomes=historical)
 
     assert "genome01" in exc_info.value.conflicts
 
 
-def test_existing_genome_ids_no_conflict_succeeds(tmp_path):
+def test_existing_genomes_no_conflict_succeeds_and_continues_numbering(tmp_path):
+    from linc.core.entities import Genome
+
     file_path = tmp_path / "genome02.faa"
     _write_fasta(str(file_path), [("g1", "MK")])
 
-    stage = GenomeLoadStage()
-    result = stage.run([str(file_path)], existing_genome_ids={"genome01"})
+    historical = {"G00001": Genome(genome_id="G00001", file_path="hist.faa", source_file_name="genome01")}
 
-    assert "genome02" in result
+    stage = GenomeLoadStage()
+    result = stage.run([str(file_path)], existing_genomes=historical)
+
+    # 新 genome_id 应接续历史最大编号分配, 不与历史冲突
+    assert set(result.keys()) == {"G00002"}
+    assert result["G00002"].source_file_name == "genome02"
 
 
 def test_one_failed_genome_does_not_block_others(tmp_path):
@@ -126,11 +183,14 @@ def test_one_failed_genome_does_not_block_others(tmp_path):
     missing_path = str(tmp_path / "missing.faa")
 
     stage = GenomeLoadStage()
+    # 按文件名排序后分配编号: good < missing
     result = stage.run([str(good_path), missing_path])
 
-    assert result["good"].status == GenomeStatus.LOADED
-    assert result["missing"].status == GenomeStatus.FAILED
-    assert len(result["good"].genes) == 1
+    good = next(g for g in result.values() if g.source_file_name == "good")
+    missing = next(g for g in result.values() if g.source_file_name == "missing")
+    assert good.status == GenomeStatus.LOADED
+    assert missing.status == GenomeStatus.FAILED
+    assert len(good.genes) == 1
 
 
 def test_discover_fasta_files_finds_all_supported_extensions(tmp_path):
@@ -159,9 +219,9 @@ def test_discover_fasta_files_empty_directory_returns_empty_list(tmp_path):
     assert found == []
 
 
-def test_duplicate_genome_id_raises_and_aborts(tmp_path):
-    # foo.fa 与 foo.faa 的文件名 stem 相同, 均解析为 genome_id="foo",
-    # 应检测到冲突并直接中断整个 run(), 而不是静默覆盖或只保留其中一个。
+def test_duplicate_genome_filename_raises_and_aborts(tmp_path):
+    # foo.fa 与 foo.faa 的文件名 stem 相同, 应检测到冲突并直接中断整个
+    # run(), 而不是静默覆盖或只保留其中一个。
     fa_path = tmp_path / "foo.fa"
     faa_path = tmp_path / "foo.faa"
     _write_fasta(str(fa_path), [("g1", "MK")])
@@ -175,7 +235,7 @@ def test_duplicate_genome_id_raises_and_aborts(tmp_path):
     assert set(exc_info.value.conflicts["foo"]) == {str(fa_path), str(faa_path)}
 
 
-def test_no_conflict_when_genome_ids_are_distinct(tmp_path):
+def test_no_conflict_when_filenames_are_distinct(tmp_path):
     # 对照: 文件名 stem 不同时不应触发冲突检测, run() 正常返回。
     foo_path = tmp_path / "foo.faa"
     bar_path = tmp_path / "bar.faa"
@@ -185,7 +245,8 @@ def test_no_conflict_when_genome_ids_are_distinct(tmp_path):
     stage = GenomeLoadStage()
     result = stage.run([str(foo_path), str(bar_path)])
 
-    assert set(result.keys()) == {"foo", "bar"}
+    source_names = {g.source_file_name for g in result.values()}
+    assert source_names == {"foo", "bar"}
 
 
 def test_leading_sequence_before_first_header_is_ignored(tmp_path):
@@ -196,7 +257,7 @@ def test_leading_sequence_before_first_header_is_ignored(tmp_path):
 
     stage = GenomeLoadStage()
     result = stage.run([str(file_path)])
-    genome = result["leading"]
+    genome = result["G00001"]
 
     assert genome.status == GenomeStatus.LOADED
     assert len(genome.genes) == 1
@@ -211,12 +272,13 @@ def test_consecutive_headers_produce_empty_record_is_skipped(tmp_path):
 
     stage = GenomeLoadStage()
     result = stage.run([str(file_path)])
-    genome = result["empty_record"]
+    genome = result["G00001"]
 
     assert genome.status == GenomeStatus.LOADED
     assert len(genome.genes) == 1
     assert genome.genes[0].sequence == "MKV"
-    assert genome.genes[0].gene_id == "empty_record|1"
+    assert genome.genes[0].gene_id == "G00001|1"
+    assert genome.genes[0].original_header == "g2"
 
 
 def test_file_with_only_empty_records_marks_failed(tmp_path):
@@ -227,7 +289,7 @@ def test_file_with_only_empty_records_marks_failed(tmp_path):
 
     stage = GenomeLoadStage()
     result = stage.run([str(file_path)])
-    genome = result["all_empty"]
+    genome = result["G00001"]
 
     assert genome.status == GenomeStatus.FAILED
     assert genome.genes == []

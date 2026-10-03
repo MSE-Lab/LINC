@@ -64,7 +64,9 @@ def test_run_loads_genomes_and_writes_summary(tmp_path):
     assert summary["total_genomes"] == 1
     assert summary["loaded_count"] == 1
     assert summary["failed_count"] == 0
-    assert summary["genomes"]["genome01"]["gene_count"] == 2
+    genome_entry = next(iter(summary["genomes"].values()))
+    assert genome_entry["gene_count"] == 2
+    assert genome_entry["source_file_name"] == "genome01"
 
 
 def test_run_reports_failed_genomes_without_crashing(tmp_path):
@@ -81,10 +83,11 @@ def test_run_reports_failed_genomes_without_crashing(tmp_path):
 
     assert result.exit_code == 0
     assert "失败 1 个" in result.stdout
-    assert "empty" in result.stdout
 
     summary = json.loads((output_dir / "load_summary.json").read_text(encoding="utf-8"))
-    assert summary["failed_genome_ids"] == ["empty"]
+    failed_id = summary["failed_genome_ids"][0]
+    assert summary["genomes"][failed_id]["source_file_name"] == "empty"
+    assert failed_id in result.stdout
 
 
 def test_run_cutoff_i_greater_than_cutoff_ii_exits_with_error(tmp_path):
@@ -173,7 +176,7 @@ def test_run_writes_intra_summary_for_loaded_genomes(tmp_path):
     assert intra_summary_path.exists()
     intra_summary = json.loads(intra_summary_path.read_text(encoding="utf-8"))
     assert intra_summary["total_genes"] == 3
-    genome_summary = intra_summary["genomes"]["genome01"]
+    genome_summary = next(iter(intra_summary["genomes"].values()))
     assert genome_summary["n_genes"] == 3
     assert genome_summary["n_orphans"] >= 1
 
@@ -194,7 +197,7 @@ def test_run_intra_summary_skipped_for_failed_genomes(tmp_path):
         (output_dir / "intra_summary.json").read_text(encoding="utf-8")
     )
     assert intra_summary["total_genes"] == 0
-    assert "empty" not in intra_summary["genomes"]
+    assert intra_summary["genomes"] == {}
 
 
 def test_run_writes_join_summary_across_genomes(tmp_path):
@@ -215,7 +218,8 @@ def test_run_writes_join_summary_across_genomes(tmp_path):
     join_summary_path = output_dir / "join_summary.json"
     assert join_summary_path.exists()
     join_summary = json.loads(join_summary_path.read_text(encoding="utf-8"))
-    assert set(join_summary["processing_order"]) == {"genome01", "genome02"}
+    load_summary = json.loads((output_dir / "load_summary.json").read_text(encoding="utf-8"))
+    assert set(join_summary["processing_order"]) == set(load_summary["genomes"].keys())
     assert join_summary["n_clusters_final"] >= 1
     assert join_summary["n_representatives_final"] >= 1
     assert isinstance(join_summary["clusters"], list)
@@ -474,12 +478,20 @@ def test_run_writes_family_summary_and_orthogroups(tmp_path):
 
     orthogroups_path = output_dir / "Orthogroups.txt"
     assert orthogroups_path.exists()
-    lines = orthogroups_path.read_text(encoding="utf-8").strip().splitlines()
+    content = orthogroups_path.read_text(encoding="utf-8")
+    lines = content.strip().splitlines()
     assert len(lines) == family_summary["n_families"]
     for line in lines:
         og_id, members = line.split("\t")
         assert og_id.startswith("OG")
         assert len(members.split(" ")) >= 1
+    # 核心修复验证(2026-10-03 与用户确认): Orthogroups.txt 中的成员 ID
+    # 必须是原始 FASTA header("g1"/"g2"/"g3"), 不能是 LINC 内部重编码后的
+    # gene_id(形如 "G00001|1")。
+    assert "|" not in content
+    all_members = " ".join(line.split("\t")[1] for line in lines)
+    for original_id in ("g1", "g2", "g3"):
+        assert original_id in all_members.split(" ")
 
 
 def test_run_custom_inflation_and_edge_weight_mode(tmp_path):
@@ -760,8 +772,8 @@ def test_run_append_adds_new_genome_to_existing_result(tmp_path):
     assert result.exit_code == 0
     load_summary = json.loads((output_dir / "load_summary.json").read_text(encoding="utf-8"))
     assert load_summary["total_genomes"] == 2
-    assert "genome01" in load_summary["genomes"]
-    assert "genome02" in load_summary["genomes"]
+    source_names = {g["source_file_name"] for g in load_summary["genomes"].values()}
+    assert source_names == {"genome01", "genome02"}
 
 
 def test_run_append_conflicting_genome_id_exits_with_error(tmp_path):

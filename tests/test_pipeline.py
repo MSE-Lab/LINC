@@ -105,7 +105,9 @@ def test_append_merges_new_genome_into_existing_result(tmp_path):
     repo = FileRepository(str(tmp_path / "state"))
     pipeline = _make_pipeline(repo)
     first = pipeline.run([str(file_a)])
-    assert set(first.genomes.keys()) == {"gA"}
+    # genome_id 现为内部短编号(方案B, 2026-10-03 与用户确认), 不再等于文件名,
+    # 改为按 source_file_name 校验。
+    assert {g.source_file_name for g in first.genomes.values()} == {"gA"}
 
     append_dir = tmp_path / "append"
     append_dir.mkdir()
@@ -115,7 +117,7 @@ def test_append_merges_new_genome_into_existing_result(tmp_path):
     append_pipeline = _make_pipeline(repo)
     appended = append_pipeline.append([str(file_b)])
 
-    assert set(appended.genomes.keys()) == {"gA", "gB"}
+    assert {g.source_file_name for g in appended.genomes.values()} == {"gA", "gB"}
     # 历史簇的 cluster_counter 应被延续, 不从0重新开始(新簇id应>=历史counter)。
     assert appended.join_result.cluster_counter >= first.join_result.cluster_counter
 
@@ -183,7 +185,9 @@ def test_resume_raises_clear_error_when_index_missing(tmp_path):
     )
     with pytest.raises(IndexMissingError) as exc_info:
         resume_pipeline.resume([str(file_path)])
-    assert "g1" in str(exc_info.value)
+    # genome_id 现为内部短编号(方案B, 2026-10-03 与用户确认), 不再等于
+    # 原始文件名"g1"; 错误信息中应点名的是实际的内部 genome_id。
+    assert "G00001" in str(exc_info.value)
 
 
 def test_append_writes_audit_log_entry(tmp_path):
@@ -210,7 +214,9 @@ def test_append_writes_audit_log_entry(tmp_path):
 
     history = repo.load_append_history()
     assert len(history) == 1
-    assert history[0]["new_genome_ids"] == ["gB"]
+    # genome_id 现为内部短编号(方案B, 2026-10-03 与用户确认), 不再等于
+    # 原始文件名; 此处只校验确有且仅有1个新增编号被记录。
+    assert len(history[0]["new_genome_ids"]) == 1
     assert history[0]["new_genome_files"] == [str(file_b)]
     assert "timestamp" in history[0]
 
@@ -222,7 +228,7 @@ def test_append_writes_audit_log_entry(tmp_path):
 
     history_after_second = repo.load_append_history()
     assert len(history_after_second) == 2
-    assert history_after_second[1]["new_genome_ids"] == ["gC"]
+    assert len(history_after_second[1]["new_genome_ids"]) == 1
 
 
 def test_resume_raises_config_mismatch_error_when_cutoff_differs(tmp_path):
@@ -426,7 +432,7 @@ def test_append_force_recomputes_historical_intra_and_full_rejoin(tmp_path):
     )
     appended = forced_pipeline.append([str(file_b)], force=True)
 
-    assert set(appended.genomes.keys()) == {"gA", "gB"}
+    assert {g.source_file_name for g in appended.genomes.values()} == {"gA", "gB"}
     # 历史基因组 gA 的 intra 应被重新计算过(调用计数 > 0 能证明确实对
     # historical_loaded 重新跑了一遍 IntraGenomeStage, 而不仅仅是对新增
     # 的 gB 跑)。由于 gA 只有1个基因, 本身不会触发 self_search 的两两

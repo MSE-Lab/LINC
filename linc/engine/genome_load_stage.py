@@ -128,69 +128,107 @@ def _parse_fasta(file_path: str) -> Iterator[Tuple[str, str]]:
                 )
 
 
+_GENOME_CODE_PREFIX = "G"
+_GENOME_CODE_WIDTH = 5
+
+
 class GenomeLoadStage:
     """对应 v1 Step1 的现代化实现。"""
 
     def run(
         self,
         genome_files: List[str],
-        existing_genome_ids: Optional[Set[str]] = None,
+        existing_genomes: Optional[Dict[str, Genome]] = None,
     ) -> Dict[str, Genome]:
         """解析一批 FASTA 文件,返回 genome_id -> Genome 映射。
 
-        genome_id 取文件名去掉扩展名(如 genome01.faa -> genome01)。
-        gene_id 格式为 "{genome_id}|{local_id}",local_id 为基因在文件中的
-        序号(从 1 开始),不使用 FASTA header 原文本作为 ID。
+        genome_id 为 LINC 内部生成的短编号(如 "G00001"),与原始文件名完全
+        解耦(2026-10-03 与用户确认"方案B": 原文件名可能包含任意字符,不
+        适合直接参与 gene_id 拼接,因此改为内部顺序编号); 原始文件名
+        (去掉扩展名)保存在 `Genome.source_file_name`,仅用于展示、重名
+        检测与 --resume/--append 一致性校验。
 
-        `existing_genome_ids`(2026-10-02, 第8步 `--append` 设计): 若传入,
-        表示历史(此前已完整运行过)已存在的 genome_id 集合; 本次新文件解析
-        出的 genome_id 若与历史集合冲突, 同样视为无法自行消歧的歧义, 直接
-        中断(与本次新文件之间互相重名的处理方式一致)。
+        gene_id 格式为 "{genome_id}|{local_id}",local_id 为基因在文件中的
+        序号(从 1 开始); 原始 FASTA header 保存在 `Gene.original_header`,
+        用于最终结果回填为用户可读的原始 ID。
+
+        `existing_genomes`(2026-10-02, 第8步 `--append` 设计; 2026-10-03
+        为配合 genome_id 短编号化改为传入完整的历史 genomes 字典): 若传入,
+        表示历史(此前已完整运行过)的 genome_id -> Genome 映射。本次用于:
+        ①按历史 `source_file_name` 检测新文件是否与历史重名(无法自行消歧
+        的歧义, 直接中断,与本次新文件之间互相重名的处理方式一致);
+        ②新 genome_id 的编号从历史最大编号之后接续分配, 保证不与历史
+        genome_id 冲突、且历史已分配的 genome_id 保持不变。
         """
-        self._check_genome_id_conflicts(genome_files, existing_genome_ids)
+        existing_genomes = existing_genomes or {}
+        existing_source_file_names = {
+            genome.source_file_name for genome in existing_genomes.values()
+        }
+        self._check_filename_conflicts(genome_files, existing_source_file_names)
+
+        next_code_num = self._next_code_number(existing_genomes)
         result: Dict[str, Genome] = {}
-        for file_path in genome_files:
-            genome_id = self._extract_genome_id(file_path)
-            genome = self._load_single_genome(genome_id, file_path)
+        for file_path in sorted(genome_files, key=self._extract_source_file_name):
+            source_file_name = self._extract_source_file_name(file_path)
+            genome_id = self._format_genome_code(next_code_num)
+            next_code_num += 1
+            genome = self._load_single_genome(genome_id, source_file_name, file_path)
             result[genome_id] = genome
         self._log_summary(result)
         return result
 
-    def _check_genome_id_conflicts(
+    @staticmethod
+    def _format_genome_code(num: int) -> str:
+        return f"{_GENOME_CODE_PREFIX}{num:0{_GENOME_CODE_WIDTH}d}"
+
+    @classmethod
+    def _next_code_number(cls, existing_genomes: Dict[str, Genome]) -> int:
+        """取历史 genome_id 编号中的最大值 + 1, 作为本次新编号的起点;
+        历史为空则从 1 开始。
+        """
+        max_num = 0
+        prefix_len = len(_GENOME_CODE_PREFIX)
+        for genome_id in existing_genomes:
+            suffix = genome_id[prefix_len:]
+            if genome_id.startswith(_GENOME_CODE_PREFIX) and suffix.isdigit():
+                max_num = max(max_num, int(suffix))
+        return max_num + 1
+
+    def _check_filename_conflicts(
         self,
         genome_files: List[str],
-        existing_genome_ids: Optional[Set[str]] = None,
+        existing_source_file_names: Optional[Set[str]] = None,
     ) -> None:
-        """检测 genome_id(文件名 stem)重名, 一旦发现立即中断整个流程。
+        """检测原始文件名(stem)重名, 一旦发现立即中断整个流程。
 
-        与单文件解析失败(不存在/为空/格式异常)不同, genome_id 冲突不是
+        与单文件解析失败(不存在/为空/格式异常)不同, 文件名冲突不是
         单个文件自身的问题, 而是程序无法自行消歧的歧义, 因此不适用
         "单文件失败不中断"的既有策略, 必须直接报错停止。
         """
-        files_by_genome_id: Dict[str, List[str]] = defaultdict(list)
+        files_by_name: Dict[str, List[str]] = defaultdict(list)
         for file_path in genome_files:
-            genome_id = self._extract_genome_id(file_path)
-            files_by_genome_id[genome_id].append(file_path)
+            source_file_name = self._extract_source_file_name(file_path)
+            files_by_name[source_file_name].append(file_path)
         conflicts = {
-            genome_id: paths
-            for genome_id, paths in files_by_genome_id.items()
+            name: paths
+            for name, paths in files_by_name.items()
             if len(paths) > 1
         }
-        if existing_genome_ids:
-            for genome_id, paths in files_by_genome_id.items():
-                if genome_id in existing_genome_ids:
-                    conflicts[genome_id] = conflicts.get(genome_id, []) + paths + ["<历史已存在>"]
+        if existing_source_file_names:
+            for name, paths in files_by_name.items():
+                if name in existing_source_file_names:
+                    conflicts[name] = conflicts.get(name, []) + paths + ["<历史已存在>"]
         if conflicts:
-            logger.error("检测到重名的 genome_id, 中断加载: %s", conflicts)
+            logger.error("检测到重名的基因组文件名, 中断加载: %s", conflicts)
             raise GenomeIdConflictError(conflicts)
 
     @staticmethod
-    def _extract_genome_id(file_path: str) -> str:
+    def _extract_source_file_name(file_path: str) -> str:
         base_name = os.path.basename(file_path)
-        genome_id, _ = os.path.splitext(base_name)
-        return genome_id
+        source_file_name, _ = os.path.splitext(base_name)
+        return source_file_name
 
-    def _load_single_genome(self, genome_id: str, file_path: str) -> Genome:
+    def _load_single_genome(self, genome_id: str, source_file_name: str, file_path: str) -> Genome:
         if not os.path.isfile(file_path):
             logger.warning(
                 "基因组文件不存在,跳过并标记为 FAILED: genome_id=%s file_path=%s",
@@ -199,20 +237,26 @@ class GenomeLoadStage:
             return Genome(
                 genome_id=genome_id,
                 file_path=file_path,
+                source_file_name=source_file_name,
                 genes=[],
                 status=GenomeStatus.FAILED,
             )
 
         genes: List[Gene] = []
         try:
-            for local_id, (_header, sequence) in enumerate(_parse_fasta(file_path), start=1):
+            for local_id, (header, sequence) in enumerate(_parse_fasta(file_path), start=1):
                 gene_id = f"{genome_id}|{local_id}"
+                # original_header 取 header 第一个空白前的 token, 与 OrthoFinder
+                # 习惯一致(2026-10-03 与用户确认"方案B"), 用于最终结果回填为
+                # 用户可读的原始序列 ID。
+                original_header = header.split()[0] if header else None
                 genes.append(
                     Gene(
                         gene_id=gene_id,
                         genome_id=genome_id,
                         length=len(sequence),
                         sequence=sequence,
+                        original_header=original_header,
                     )
                 )
         except OSError:
@@ -223,6 +267,7 @@ class GenomeLoadStage:
             return Genome(
                 genome_id=genome_id,
                 file_path=file_path,
+                source_file_name=source_file_name,
                 genes=[],
                 status=GenomeStatus.FAILED,
             )
@@ -235,13 +280,23 @@ class GenomeLoadStage:
             return Genome(
                 genome_id=genome_id,
                 file_path=file_path,
+                source_file_name=source_file_name,
                 genes=[],
                 status=GenomeStatus.FAILED,
+            )
+
+        headers_seen = [g.original_header for g in genes if g.original_header is not None]
+        if len(headers_seen) != len(set(headers_seen)):
+            logger.warning(
+                "基因组文件内存在重复的原始序列 ID(original_header), "
+                "回填 Orthogroups.txt 时将自动加 #序号 消歧: genome_id=%s file_path=%s",
+                genome_id, file_path,
             )
 
         return Genome(
             genome_id=genome_id,
             file_path=file_path,
+            source_file_name=source_file_name,
             genes=genes,
             status=GenomeStatus.LOADED,
         )

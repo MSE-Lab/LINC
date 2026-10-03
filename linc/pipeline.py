@@ -444,9 +444,8 @@ class Pipeline:
         historical_intra = repo.load_intra_results()
         historical_join = repo.load_join_result()
 
-        existing_genome_ids = set(historical_genomes.keys())
         new_genomes = GenomeLoadStage().run(
-            new_genome_files, existing_genome_ids=existing_genome_ids
+            new_genome_files, existing_genomes=historical_genomes
         )
         new_loaded = self._loaded_only(new_genomes)
 

@@ -117,6 +117,9 @@ def _build_load_summary(genomes: dict) -> dict:
                 "status": genome.status.value if genome.status else None,
                 "gene_count": len(genome.genes),
                 "file_path": genome.file_path,
+                # genome_id 为内部短编号(方案B, 2026-10-03 与用户确认), 此处
+                # 附带原始文件名, 便于用户把 genome_id 对照回原始输入。
+                "source_file_name": genome.source_file_name,
             }
             for genome_id, genome in genomes.items()
         },
@@ -165,14 +168,41 @@ def _build_family_summary(families, inflation: float, edge_weight_mode: str) -> 
     }
 
 
-def _write_orthogroups_txt(families, path: str) -> None:
+def _build_gene_id_to_original(genomes: dict) -> dict:
+    """构建 gene_id -> 原始序列 ID 的映射, 用于将 Orthogroups.txt 中的
+    内部 gene_id("{genome_id}|{local_id}")回填为用户可识别的原始 ID
+    (2026-10-03 与用户确认"方案B": 原始 ID 不再因内部重编码而丢失)。
+
+    同一基因组内若存在重复的 original_header, 按出现顺序加 "#2"/"#3"...
+    后缀消歧, 保证映射后的值仍然全局唯一(与 GenomeLoadStage 解析阶段的
+    重复 warning 配套)。若 original_header 缺失(理论上不应出现, 除非解析
+    异常), 回退使用内部 gene_id 本身, 避免丢失成员。
+    """
+    mapping: dict = {}
+    for genome in genomes.values():
+        seen_count: dict = {}
+        for gene in genome.genes:
+            header = gene.original_header or gene.gene_id
+            seen_count[header] = seen_count.get(header, 0) + 1
+            if seen_count[header] > 1:
+                header = f"{header}#{seen_count[header]}"
+            mapping[gene.gene_id] = header
+    return mapping
+
+
+def _write_orthogroups_txt(families, gene_id_to_original: dict, path: str) -> None:
     """输出 Orthogroups.txt(一行一个 ortholog group): 第一列是 OG 编号,
-    第二列是该家族全部成员基因ID, 用空格分隔(与用户确认, 2026-10-02)。
+    第二列是该家族全部成员的原始序列 ID(不再是 LINC 内部重编码后的
+    gene_id, 2026-10-03 与用户确认修复), 用空格分隔(整体格式与用户
+    确认, 2026-10-02)。
     """
     with open(path, "w", encoding="utf-8") as fh:
         for family in families:
-            members = " ".join(sorted(family.member_genes))
-            fh.write(f"{family.family_id}\t{members}\n")
+            members = [
+                gene_id_to_original.get(gene_id, gene_id)
+                for gene_id in sorted(family.member_genes)
+            ]
+            fh.write(f"{family.family_id}\t{' '.join(members)}\n")
 
 
 def _build_intra_summary(intra_results: dict) -> dict:
@@ -609,7 +639,8 @@ def run(
             json.dump(family_summary, fh, ensure_ascii=False, indent=2)
 
         orthogroups_path = os.path.join(output_dir, "Orthogroups.txt")
-        _write_orthogroups_txt(result.families, orthogroups_path)
+        gene_id_to_original = _build_gene_id_to_original(result.genomes)
+        _write_orthogroups_txt(result.families, gene_id_to_original, orthogroups_path)
 
         typer.echo(f"MCL 亚家族细分完成: 共 {family_summary['n_families']} 个直系同源家族")
         typer.echo(f"摘要已写入: {family_summary_path}")

@@ -21,23 +21,40 @@ class GenomeStatus(str, Enum):
 class Gene:
     """基因实体。
 
-    gene_id 格式约定为 "{genome_id}|{local_id}",保证跨基因组全局唯一。
+    gene_id 格式约定为 "{genome_id}|{local_id}",genome_id/local_id 均为 LINC
+    内部生成的编号,保证跨基因组全局唯一,但不具备可读性(2026-10-03 与用户
+    确认"方案B": genome_id 不再取自文件名,而是内部短编号,因此 gene_id 全程
+    与原始数据解耦)。`original_header` 保存该基因在原始 FASTA 文件中的
+    header(取 ">" 后到第一个空白前的 token,与 OrthoFinder 习惯一致),
+    用于最终结果(如 Orthogroups.txt)回填为用户可读的原始 ID;仅在解析失败
+    等极端情况下才可能为 None。
     """
 
     gene_id: str
     genome_id: str
     length: int
     sequence: Optional[str] = None   # 允许延迟加载,大规模场景下不常驻内存
+    original_header: Optional[str] = None
 
 
 @dataclass
 class Genome:
-    """基因组实体,持有该基因组下的全部基因列表。"""
+    """基因组实体,持有该基因组下的全部基因列表。
+
+    genome_id 为 LINC 内部生成的短编号(如 "G00001"),与原始输入文件名
+    完全解耦(2026-10-03 与用户确认"方案B"); `source_file_name` 保存原始
+    文件名(去掉扩展名),用于展示、--resume/--append 一致性校验以及把
+    genome_id 翻译回用户可识别的基因组名称。
+    """
 
     genome_id: str
     file_path: str
     genes: List[Gene] = field(default_factory=list)
     status: Optional[GenomeStatus] = None
+    # 默认空串仅为向后兼容大量未显式传入该字段的既有测试夹具/手工构造场景;
+    # GenomeLoadStage 生产路径下必定会显式传入真实的原始文件名(2026-10-03
+    # 与用户确认"方案B")。
+    source_file_name: str = ""
 
 
 @dataclass
