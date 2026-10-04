@@ -18,7 +18,7 @@ import logging
 import os
 from collections import defaultdict
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from ..core.entities import (
     COV_MODE_BIDIRECTIONAL,
@@ -58,6 +58,7 @@ class GlobalJoinStage:
         event_bus: Optional[EventBus] = None,
         cleanup_intermediate: bool = True,
         dump_raw_hits: Optional[str] = None,
+        touch_evalue: Optional[float] = None,
     ) -> None:
         self._aligner = aligner
         self._cutoff_i = cutoff_i
@@ -73,6 +74,11 @@ class GlobalJoinStage:
         # 调试出口(2026-10-03 与用户确认): 非空时把 cutoff 过滤前的全部原始
         # 比对 hit 落盘到该目录, 供离线 RBB 验证使用; 不改变任何算法逻辑。
         self._dump_raw_hits = dump_raw_hits
+        # 新增(2026-10-04, 接触判据/纳入判据解耦设计方案): 接触判据的 evalue
+        # 阈值。None = 最宽松(所有 search 返回的 hit 都算接触)。只用于
+        # "打标记"(touching_map), 完全不参与下面的合并(纳入判据)逻辑。
+        self._touch_evalue = touch_evalue
+        self._touching_map: Dict[str, Set[str]] = defaultdict(set)
 
     def run(
         self,
@@ -94,6 +100,7 @@ class GlobalJoinStage:
         global_lib = initial_global_lib if initial_global_lib is not None else GlobalRepresentativeLibrary()
         ssn_edges = set(initial_ssn_edges) if initial_ssn_edges is not None else set()
         self._cluster_counter = initial_cluster_counter
+        self._touching_map = defaultdict(set)
         total = len(order)
 
         for idx, genome_id in enumerate(order, start=1):
@@ -130,6 +137,7 @@ class GlobalJoinStage:
             n_clusters_final=global_lib.n_active_clusters,
             n_representatives_final=global_lib.n_representatives,
             cluster_counter=self._cluster_counter,
+            touching_map=dict(self._touching_map),
         )
         logger.info(
             "GlobalJoinStage 完成: genomes=%d n_clusters_final=%d "
@@ -193,6 +201,19 @@ class GlobalJoinStage:
 
         self._dump_hits(hits, "join")
 
+        # 【新增, 2026-10-04 接触判据/纳入判据解耦设计方案】接触判据:
+        # 只打标记, 不参与 merge。默认(touch_evalue=None)所有返回 hit 都算接触。
+        # 方向说明: 本次 search 的 query=全局代表、subject=本基因组基因,
+        # 故 hit.query_id 是全局代表 -> gene_to_cluster[hit.query_id] 是该簇;
+        # 语义是"该簇接触了本基因组"。
+        for hit in hits:
+            if self._touch_evalue is not None and hit.evalue > self._touch_evalue:
+                continue
+            cluster_id = global_lib.gene_to_cluster.get(hit.query_id)
+            if cluster_id is not None:
+                self._touching_map[genome.genome_id].add(cluster_id)
+
+        # 【现有, 不变】纳入判据: 只有强 hit 参与合并(进而决定 cutoff_ii 成员/代表)
         hits_by_gene: Dict[str, List[AlignmentResult]] = defaultdict(list)
         for hit in hits:
             if passes_inclusion_cutoff(hit, self._cutoff_i, self._cutoff_c, self._cov_mode):

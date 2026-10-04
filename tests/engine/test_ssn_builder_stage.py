@@ -692,3 +692,139 @@ def test_full_mode_merges_multiple_source_genomes_sharing_same_target(monkeypatc
     assert frozenset(("A|1", "B|1")) in actual_pairs
     assert frozenset(("A|1", "C|1")) in actual_pairs
     assert frozenset(("B|1", "C|1")) in actual_pairs
+
+
+# ---------------------------------------------------------------------------
+# 接触判据/纳入判据解耦设计方案(2026-10-04): touching_map 驱动的扩搜索范围
+# + 去掉同簇过滤 相关单测。
+# ---------------------------------------------------------------------------
+
+def test_full_mode_touching_map_expands_search_to_genome_with_no_cluster_members():
+    """核心场景: 全局簇 global|cluster_0 只有基因组 A 的成员(从未并入
+    基因组 C), 但 GlobalJoinStage 记录了该簇"接触"过 C(弱命中、纳入判据
+    不达标)。full 模式应据此把该簇在其它基因组(A)的成员也加入针对 C 的
+    query, 即便二者原本分属不同的全局簇(C 自己的簇), 只要比对结果达标
+    (passes_inclusion_cutoff)就应该成边(同簇过滤已去掉, 纳入判据兜底)。
+    """
+    a1 = _gene("A|1", "A")
+    c1 = _gene("C|1", "C")
+    genomes = {
+        "A": Genome(genome_id="A", file_path="a.faa", genes=[a1]),
+        "C": Genome(genome_id="C", file_path="c.faa", genes=[c1]),
+    }
+    intra_results = {
+        "A": GenomeIntraResult(
+            genome_id="A",
+            local_clusters=[
+                LocalCluster(cluster_id="A|cluster_0", member_ids={"A|1"},
+                              representative_ids=["A|1"], is_orphan=True),
+            ],
+            local_representatives=["A|1"],
+            n_genes=1, n_clusters=1, n_representatives=1,
+            pairwise_hits=[],
+        ),
+        "C": GenomeIntraResult(
+            genome_id="C",
+            local_clusters=[
+                LocalCluster(cluster_id="C|cluster_0", member_ids={"C|1"},
+                              representative_ids=["C|1"], is_orphan=True),
+            ],
+            local_representatives=["C|1"],
+            n_genes=1, n_clusters=1, n_representatives=1,
+            pairwise_hits=[],
+        ),
+    }
+    # 两个互不相干的全局簇: global|cluster_0 只有 A 的成员(从未并入C),
+    # global|cluster_1 是 C 自己独立成的簇。
+    global_lib = GlobalRepresentativeLibrary(
+        clusters=[
+            GlobalCluster(cluster_id="global|cluster_0",
+                           representative_ids={"A|1"}, member_ids={"A|1"}, active=True),
+            GlobalCluster(cluster_id="global|cluster_1",
+                           representative_ids={"C|1"}, member_ids={"C|1"}, active=True),
+        ]
+    )
+    incremental_result = IncrementalResult(
+        global_lib=global_lib,
+        ssn_edges=set(),
+        # GlobalJoinStage 记录: global|cluster_0 这个簇接触过基因组 C
+        # (弱命中, 纳入判据不达标, 从未真正合并), 但本次改动前这部分
+        # target 基因组永远不会被纳入 full 模式的搜索范围。
+        touching_map={"C": {"global|cluster_0"}},
+    )
+
+    aligner = MockAligner()
+    aligner.set_result("A|1", "C|1", _hit("A|1", "C|1", identity=0.9, coverage=0.9))
+
+    stage = SSNBuilderStage(aligner=aligner, edge_completion_mode="full")
+    result = stage.run(genomes, intra_results, incremental_result)
+
+    actual_pairs = {frozenset((e.source, e.target)) for e in result.edges}
+    assert frozenset(("A|1", "C|1")) in actual_pairs
+
+
+def test_full_mode_same_cluster_filter_removed_allows_cross_cluster_edges():
+    """验证"去掉同簇过滤"的改动: query/subject 分属不同全局簇的真实高相似度
+    命中, 此前会被"双方须属于同一个簇"的过滤直接丢弃, 现在应该保留
+    (只要通过纳入判据)。
+
+    构造: A|1/B|1 合并进同一个全局簇; B|2 是基因组B内另一个、未与任何人
+    合并的独立局部簇(自成一个全局簇)。full 模式对 target=B 发起 search 时,
+    索引(整个基因组B)天然包含 B|2, 若 A|1 与 B|2 恰好有一条高相似度命中,
+    去掉同簇过滤前会被丢弃, 去掉后应该成边。
+    """
+    a1 = _gene("A|1", "A")
+    b1, b2 = _gene("B|1", "B"), _gene("B|2", "B")
+    genomes = {
+        "A": Genome(genome_id="A", file_path="a.faa", genes=[a1]),
+        "B": Genome(genome_id="B", file_path="b.faa", genes=[b1, b2]),
+    }
+    intra_results = {
+        "A": GenomeIntraResult(
+            genome_id="A",
+            local_clusters=[
+                LocalCluster(cluster_id="A|cluster_0", member_ids={"A|1"},
+                              representative_ids=["A|1"], is_orphan=True),
+            ],
+            local_representatives=["A|1"],
+            n_genes=1, n_clusters=1, n_representatives=1,
+            pairwise_hits=[],
+        ),
+        "B": GenomeIntraResult(
+            genome_id="B",
+            local_clusters=[
+                LocalCluster(cluster_id="B|cluster_0", member_ids={"B|1"},
+                              representative_ids=["B|1"], is_orphan=True),
+                LocalCluster(cluster_id="B|cluster_1", member_ids={"B|2"},
+                              representative_ids=["B|2"], is_orphan=True),
+            ],
+            local_representatives=["B|1", "B|2"],
+            n_genes=2, n_clusters=2, n_representatives=2,
+            pairwise_hits=[_hit("B|1", "B|2", identity=0.1, coverage=0.1)],
+            genome_index=[b1, b2],
+        ),
+    }
+    global_lib = GlobalRepresentativeLibrary(
+        clusters=[
+            GlobalCluster(cluster_id="global|cluster_0",
+                           representative_ids={"A|1", "B|1"},
+                           member_ids={"A|1", "B|1"}, active=True),
+            GlobalCluster(cluster_id="global|cluster_1",
+                           representative_ids={"B|2"}, member_ids={"B|2"}, active=True),
+        ]
+    )
+    incremental_result = IncrementalResult(global_lib=global_lib, ssn_edges=set())
+
+    aligner = MockAligner()
+    aligner.set_result("A|1", "B|1", _hit("A|1", "B|1", identity=0.9, coverage=0.9))
+    # A|1 与分属另一个全局簇的 B|2 也恰好有一条高相似度命中。
+    aligner.set_result("A|1", "B|2", _hit("A|1", "B|2", identity=0.9, coverage=0.9))
+
+    stage = SSNBuilderStage(aligner=aligner, edge_completion_mode="full")
+    result = stage.run(genomes, intra_results, incremental_result)
+
+    actual_pairs = {frozenset((e.source, e.target)) for e in result.edges}
+    assert frozenset(("A|1", "B|1")) in actual_pairs
+    # 同簇过滤已去掉: A|1(cluster_0) 与 B|2(cluster_1) 虽分属不同全局簇,
+    # 但纳入判据达标, 应该成边。
+    assert frozenset(("A|1", "B|2")) in actual_pairs

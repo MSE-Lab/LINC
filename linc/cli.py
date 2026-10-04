@@ -487,6 +487,15 @@ def run(
              "from the join and full-completion stages into this directory, as TSV files "
              "raw_join_hits.tsv and raw_full_hits.tsv. Does not change any clustering logic.",
     ),
+    touch_evalue: Optional[float] = typer.Option(
+        None, "--touch-evalue",
+        help="E-value threshold for the 'touching' criterion used by --edge-completion-mode "
+             "full: a global cluster whose representative hits a genome below this e-value is "
+             "marked as 'touching' that genome, so its members get cross-compared even if the "
+             "hit is too weak to merge. None (default) treats every search hit as touching "
+             "(maximally relaxed); set a smaller value (e.g. 1e-10) to tighten it and reduce "
+             "full-stage cost.",
+    ),
     force: bool = typer.Option(
         False, "--force",
         help="With --resume/--append, continue (with a warning) even if algorithm parameters "
@@ -707,6 +716,7 @@ def run(
                 keep_intermediate=keep_intermediate,
                 threads=threads,
                 dump_raw_hits=dump_raw_hits,
+                touch_evalue=touch_evalue,
             ),
         )
 

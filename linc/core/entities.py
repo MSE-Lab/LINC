@@ -385,6 +385,11 @@ class IncrementalResult:
     n_clusters_final: int = 0
     n_representatives_final: int = 0
     cluster_counter: int = 0
+    # 新增(2026-10-03, 接触判据/纳入判据解耦设计方案): 接触关系映射。
+    # key = target 基因组 id, value = "接触了该基因组"的全局簇 id 集合。
+    # GlobalJoinStage 按宽松的接触判据(evalue)记录, SSNBuilderStage full
+    # 补边据此决定"哪些簇的成员需要被搜", 与"合并(纳入判据)"解耦。
+    touching_map: Dict[str, Set[str]] = field(default_factory=dict)
 
 
 # 补边模式(Step4+5 合并, SSNBuilderStage, 与用户确认, 2026-10-02):

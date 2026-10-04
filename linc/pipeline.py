@@ -97,6 +97,12 @@ class PipelineConfig:
     # 供离线 RBB 等验证脚本使用。纯调试参数, 不改变任何算法逻辑, 不影响结果,
     # 已加入 non_semantic_fields, 不参与 resume/append 的参数一致性校验。
     dump_raw_hits: Optional[str] = None
+    # 新增(2026-10-04, 接触判据/纳入判据解耦设计方案): 接触判据的 evalue
+    # 阈值。None = 最宽松(所有 search 返回的 hit 都算接触, 即 evalue <= 搜索
+    # 阈值); 设为更小值(如 1e-10)可收紧"接触"、减少 full 补边的搜索量
+    # (性能旋钮)。语义参数, 影响结果, 纳入一致性校验(不加进
+    # non_semantic_fields)。
+    touch_evalue: Optional[float] = None
 
 
 @dataclass
@@ -268,6 +274,7 @@ class Pipeline:
             max_per_cluster=config.max_per_cluster,
             cleanup_intermediate=not config.keep_intermediate,
             dump_raw_hits=config.dump_raw_hits,
+            touch_evalue=config.touch_evalue,
         )
         return join_stage.run(
             loaded_genomes,
@@ -482,6 +489,14 @@ class Pipeline:
                 initial_ssn_edges=historical_join.ssn_edges,
                 initial_cluster_counter=historical_join.cluster_counter,
             )
+            # 已知局限(2026-10-04, 接触判据/纳入判据解耦设计方案, 与设计
+            # 方案第6节"本方案先做全量, append 留后续"一致): `_run_join`
+            # 只对本次新增基因组重新记录 touching_map, 历史 join_result 里
+            # 的 touching_map 不会被接续合并进来, 即 append 场景下"接触放宽"
+            # 只对新追加的基因组生效, 历史基因组之间的接触关系不会被补充
+            # 扩展。这不会产生错误结果(SSNBuilderStage 的纳入判据兜底依旧
+            # 生效), 只是收益打了折扣, 留待后续按需实现
+            # `initial_touching_map` 接续。
 
         complete_ssn = self._run_ssn(merged_loaded, merged_intra_results, join_result)
         families = self._run_family(complete_ssn, merged_intra_results)

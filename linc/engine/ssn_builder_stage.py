@@ -49,6 +49,7 @@ from ..core.entities import (
     EDGE_COMPLETION_NONE,
     EDGE_COMPLETION_REPRESENTATIVE_MEMBER,
     AlignmentResult,
+    Cluster,
     CompleteSSN,
     Gene,
     Genome,
@@ -243,6 +244,16 @@ class SSNBuilderStage:
         global_lib = incremental_result.global_lib
         gene_cluster_map: Dict[str, str] = {}
 
+        # cluster_id -> Cluster 的本地索引(2026-10-04 修复: 不直接用
+        # global_lib.get_cluster(), 因为其内部 _cluster_index 只在
+        # add_new_cluster/merge_clusters 等"写路径"里维护; 若调用方/测试
+        # 直接用 GlobalRepresentativeLibrary(clusters=[...]) 构造(未经
+        # 写路径), _cluster_index 会是空的, get_cluster 恒返回 None。
+        # 这里直接从 global_lib.clusters 现算一份, 保证无论 global_lib
+        # 如何构造都能正确查到簇, 下面的 touching_map 扩搜索范围逻辑复用
+        # 此索引。)
+        cluster_by_id: Dict[str, Cluster] = {c.cluster_id: c for c in global_lib.clusters}
+
         # gene_id -> 所属局部簇 id(用于识别"同基因组, 跨局部簇"的基因对;
         # 同一局部簇内的基因对已经由 _add_known_intra_genome_edges() 覆盖,
         # 这里需要排除掉, 避免重复处理)。
@@ -346,6 +357,28 @@ class SSNBuilderStage:
                         members_by_genome[genome_a]
                     )
 
+        # 【新增, 2026-10-04 接触判据/纳入判据解耦设计方案】扩搜索范围:
+        # 上面的循环只覆盖"簇内已有成员"的基因组对, 但一个簇若只是对某个
+        # 基因组有"evalue达标但纳入判据不达标"的弱命中(接触了该基因组,
+        # 却从未真正合并进去), 该基因组此前永远不会被纳入 query 范围,
+        # 导致"该簇其它基因组的成员其实可能比代表更强、本可成边"的情况
+        # 被永久漏掉。这里按 GlobalJoinStage 记录的 touching_map(接触判据,
+        # 与纳入判据/合并解耦)补充这部分 target 基因组的 query 基因,
+        # query_genes_by_target_genome 是 Set, 与上面已有的成员重复添加
+        # 会自动去重, 不影响已覆盖的部分。
+        touching_map = incremental_result.touching_map or {}
+        for genome_b, cluster_ids in touching_map.items():
+            for cluster_id in cluster_ids:
+                cluster = cluster_by_id.get(cluster_id)
+                if cluster is None or not cluster.active:
+                    continue
+                for gene_id in cluster.member_ids:
+                    gene_cluster_map[gene_id] = cluster.cluster_id
+                    gene = genes_by_id.get(gene_id)
+                    if gene is None or gene.genome_id == genome_b:
+                        continue
+                    query_genes_by_target_genome.setdefault(genome_b, set()).add(gene_id)
+
         logger.info(
             "SSNBuilderStage(full模式): 需要新发起比对的target基因组数=%d"
             "(与簇数/基因组对数无关)",
@@ -377,14 +410,13 @@ class SSNBuilderStage:
             self._dump_hits(hits, "full")
 
             for hit in hits:
-                # search 的 target 是整个基因组b的索引, query 可能来自多个
-                # 不同的 source 基因组, 可能命中分属不同簇的无关基因, 只保留
-                # 双方属于同一个簇的结果。
-                if gene_cluster_map.get(hit.query_id) != gene_cluster_map.get(hit.subject_id):
-                    continue
-                # 纳入判据修复(2026-10-03, 与用户确认, 第二轮漏洞2): 新发起
-                # 的跨基因组比对结果同样需要统一走 passes_inclusion_cutoff()
-                # 过滤, 保持与 GlobalJoinStage/IntraGenomeStage 一致的判据。
+                # 【改动, 2026-10-04 接触判据/纳入判据解耦设计方案】去掉
+                # "同簇过滤": 此前这里要求 query/subject 双方属于同一个簇
+                # 才加边, 但接触放宽后, "接触了 genome_b 但没并入 genome_b"
+                # 的簇, 其成员命中 genome_b 的基因必然在别的簇(否则早被
+                # 合并进同一簇了), 同簇过滤会把这部分真边全部拒绝掉,
+                # 与本次改动的目的相悖。保留纳入判据(identity+coverage)
+                # 作为唯一兜底, 防止混入弱边。
                 if not passes_inclusion_cutoff(
                     hit, self._cutoff_i, self._cutoff_c, self._cov_mode
                 ):

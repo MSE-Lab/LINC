@@ -37,7 +37,8 @@ def _make_genome_and_intra(genome_id: str, genes, representatives):
 
 
 def _stage(
-    aligner, cutoff_i=0.5, cutoff_ii=0.8, cutoff_c=0.0, cov_mode=0, max_per_cluster=5
+    aligner, cutoff_i=0.5, cutoff_ii=0.8, cutoff_c=0.0, cov_mode=0, max_per_cluster=5,
+    touch_evalue=None,
 ) -> GlobalJoinStage:
     return GlobalJoinStage(
         aligner=aligner,
@@ -46,6 +47,7 @@ def _stage(
         cutoff_c=cutoff_c,
         cov_mode=cov_mode,
         max_per_cluster=max_per_cluster,
+        touch_evalue=touch_evalue,
     )
 
 
@@ -431,3 +433,81 @@ def test_max_per_cluster_caps_single_cluster_path_representatives():
     assert result.n_clusters_final == 1
     cluster = result.global_lib.clusters[0]
     assert len(cluster.representative_ids) <= 2
+
+
+# ---------------------------------------------------------------------------
+# 接触判据/纳入判据解耦设计方案(2026-10-04): touching_map 相关单测。
+# ---------------------------------------------------------------------------
+
+def test_touching_map_records_weak_hit_even_when_inclusion_cutoff_fails():
+    """核心场景: 弱 hit(evalue 达标、identity 不达标纳入判据)不应合并,
+    但应被记录进 touching_map(接触判据与纳入判据解耦的关键验证)。
+    """
+    a = _gene("g1", 1, length=100)
+    b = _gene("g2", 1, length=100)
+    genome_a, intra_a = _make_genome_and_intra("g1", [a], [a.gene_id])
+    genome_b, intra_b = _make_genome_and_intra("g2", [b], [b.gene_id])
+
+    aligner = MockAligner()
+    weak_hit = AlignmentResult(
+        query_id=a.gene_id, subject_id=b.gene_id,
+        identity=0.1, query_cover=0.1, subject_cover=0.1,
+        evalue=1e-5, bitscore=10.0, alignment_length=10,
+    )
+    aligner.set_result(a.gene_id, b.gene_id, weak_hit)
+
+    result = _stage(aligner, cutoff_i=0.5, cutoff_c=0.0).run(
+        {"g1": genome_a, "g2": genome_b}, {"g1": intra_a, "g2": intra_b}
+    )
+
+    # 纳入判据(identity>=0.5)不达标, 不应合并 -> 各自独立成簇。
+    assert result.n_clusters_final == 2
+    [a_cluster_id] = [
+        c.cluster_id for c in result.global_lib.clusters
+        if c.active and a.gene_id in c.representative_ids
+    ]
+    # 但接触判据(touch_evalue=None, 最宽松)应记录 g2 接触了 a 所在的簇。
+    assert a_cluster_id in result.touching_map.get("g2", set())
+
+
+def test_touch_evalue_filters_out_weak_hits_from_touching_map():
+    """收紧 touch_evalue 后, evalue 超过阈值的 hit 不应被记录为接触。"""
+    a = _gene("g1", 1, length=100)
+    b = _gene("g2", 1, length=100)
+    genome_a, intra_a = _make_genome_and_intra("g1", [a], [a.gene_id])
+    genome_b, intra_b = _make_genome_and_intra("g2", [b], [b.gene_id])
+
+    aligner = MockAligner()
+    weak_hit = AlignmentResult(
+        query_id=a.gene_id, subject_id=b.gene_id,
+        identity=0.1, query_cover=0.1, subject_cover=0.1,
+        evalue=1e-5, bitscore=10.0, alignment_length=10,
+    )
+    aligner.set_result(a.gene_id, b.gene_id, weak_hit)
+
+    result = _stage(aligner, cutoff_i=0.5, cutoff_c=0.0, touch_evalue=1e-10).run(
+        {"g1": genome_a, "g2": genome_b}, {"g1": intra_a, "g2": intra_b}
+    )
+
+    assert result.touching_map.get("g2", set()) == set()
+
+
+def test_touch_evalue_none_also_marks_strong_hits_as_touching():
+    """接触标记与合并逻辑正交: 一条足够强、正常合并的 hit, 同样应被记录进
+    touching_map(接触判据只是"打标记", 不影响、也不被合并逻辑排斥)。
+    """
+    a = _gene("g1", 1, length=100)
+    b = _gene("g2", 1, length=100)
+    genome_a, intra_a = _make_genome_and_intra("g1", [a], [a.gene_id])
+    genome_b, intra_b = _make_genome_and_intra("g2", [b], [b.gene_id])
+
+    aligner = MockAligner()
+    aligner.set_result(a.gene_id, b.gene_id, _result(a, b, identity=0.9))
+
+    result = _stage(aligner, cutoff_i=0.5, cutoff_ii=0.8, cutoff_c=0.0).run(
+        {"g1": genome_a, "g2": genome_b}, {"g1": intra_a, "g2": intra_b}
+    )
+
+    assert result.n_clusters_final == 1   # 正常合并, cutoff_ii 逻辑不受影响
+    [cluster_id] = [c.cluster_id for c in result.global_lib.clusters if c.active]
+    assert cluster_id in result.touching_map.get("g2", set())

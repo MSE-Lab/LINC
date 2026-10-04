@@ -64,7 +64,9 @@ class FileRepository:
     # source_file_name 字段、Gene 新增 original_header 字段, 且 genome_id
     # 的语义从"文件名 stem"变为"内部短编号(G00001...)", 属于本注释所述
     # "新增字段"与"改变语义"两种触发条件, 故递增版本号。
-    SCHEMA_VERSION = 2
+    # 2026-10-04 递增至3(接触判据/纳入判据解耦设计方案): IncrementalResult
+    # 新增 touching_map 字段, 命中"新增字段"触发条件, 故递增版本号。
+    SCHEMA_VERSION = 3
 
     _FILES = {
         "genomes": "genomes.pkl",
