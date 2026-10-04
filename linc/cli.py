@@ -290,10 +290,13 @@ def _build_pan_genome_data(families: list, gene_to_genome: dict, genome_names: l
     - presence_absence: {family_id: {genome_name: copy_number}}
     - family_category: {family_id: category}
     - genome_breakdown: {genome_name: {category: gene_count}}
+    - n_single_copy_core: core 家族中, 在其出现的每个基因组内拷贝数都
+      恰好为 1 的家族数量(独立统计量, 不影响上述五分类的互斥性)。
     """
     n_total_genomes = len(genome_names)
     presence_absence = {}
     family_category = {}
+    n_single_copy_core = 0
     genome_breakdown = {
         genome_name: {category: 0 for category in _PAN_CATEGORIES}
         for genome_name in genome_names
@@ -321,6 +324,8 @@ def _build_pan_genome_data(families: list, gene_to_genome: dict, genome_names: l
         n_members = sum(copy_counts.values())
         category = _classify_family(n_genomes_present, n_total_genomes, n_members)
         family_category[family_id] = category
+        if category == "core" and all(count == 1 for count in copy_counts.values()):
+            n_single_copy_core += 1
 
         for genome_name, count in copy_counts.items():
             genome_breakdown[genome_name][category] += count
@@ -328,6 +333,7 @@ def _build_pan_genome_data(families: list, gene_to_genome: dict, genome_names: l
     return {
         "presence_absence": presence_absence,
         "family_category": family_category,
+        "n_single_copy_core": n_single_copy_core,
         "genome_breakdown": genome_breakdown,
     }
 
@@ -345,8 +351,12 @@ def _write_presence_absence_matrix(
             fh.write(f"{family_id}\t" + "\t".join(row) + "\n")
 
 
-def _write_pan_genome_summary(family_category: dict, path: str) -> None:
-    """输出 pan_genome_summary.tsv: 按分类列出 OG 数量及占比。"""
+def _write_pan_genome_summary(
+    family_category: dict, n_single_copy_core: int, path: str
+) -> None:
+    """输出 pan_genome_summary.tsv: 按分类列出 OG 数量及占比; 额外追加一行
+    single-copy-core(core 家族中各基因组拷贝数均为 1 的家族数量, 占比分母
+    为 core 家族总数, 而非全部家族总数)。"""
     total = len(family_category)
     counts = {category: 0 for category in _PAN_CATEGORIES}
     for category in family_category.values():
@@ -357,6 +367,9 @@ def _write_pan_genome_summary(family_category: dict, path: str) -> None:
             n = counts[category]
             pct = (n / total * 100) if total else 0.0
             fh.write(f"{category}\t{n}\t{pct:.2f}%\n")
+        n_core = counts["core"]
+        sc_pct = (n_single_copy_core / n_core * 100) if n_core else 0.0
+        fh.write(f"single-copy-core\t{n_single_copy_core}\t{sc_pct:.2f}%\n")
 
 
 def _write_per_genome_breakdown(
@@ -900,7 +913,9 @@ def pan(
     _write_presence_absence_matrix(pan_data["presence_absence"], genome_names, matrix_path)
 
     summary_path = os.path.join(output_dir, "pan_genome_summary.tsv")
-    _write_pan_genome_summary(pan_data["family_category"], summary_path)
+    _write_pan_genome_summary(
+        pan_data["family_category"], pan_data["n_single_copy_core"], summary_path
+    )
 
     breakdown_path = os.path.join(output_dir, "per_genome_breakdown.tsv")
     _write_per_genome_breakdown(pan_data["genome_breakdown"], genome_names, breakdown_path)

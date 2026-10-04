@@ -80,6 +80,46 @@ def test_pan_classifies_core_softcore_shell_cloud_singleton(tmp_path):
     assert rows["shell"] == "1"
     assert rows["cloud"] == "1"
     assert rows["singleton"] == "1"
+    # OG0000000(core) 在每个基因组内都只有 1 条成员基因, 应计入 single-copy-core。
+    assert rows["single-copy-core"] == "1"
+
+
+def test_pan_single_copy_core_excludes_multi_copy_core_family(tmp_path):
+    """core 家族若存在任意基因组内拷贝数 > 1(多拷贝), 不应计入 single-copy-core,
+    但仍应正常计入 core 分类。"""
+    genomes = [f"g{i}" for i in range(1, 3)]
+    gene_genome_lines = [f"{g}_core_a\t{g}" for g in genomes]
+    gene_genome_lines.append(f"{genomes[0]}_core_b\t{genomes[0]}")
+
+    gene_genome_path = tmp_path / "gene_genome.tsv"
+    _write_lines(str(gene_genome_path), gene_genome_lines)
+
+    orthogroups_lines = [
+        "OG0000000\t"
+        + " ".join([f"{g}_core_a" for g in genomes] + [f"{genomes[0]}_core_b"]),
+    ]
+    orthogroups_path = tmp_path / "Orthogroups.txt"
+    _write_lines(str(orthogroups_path), orthogroups_lines)
+
+    output_dir = tmp_path / "out"
+    result = runner.invoke(
+        app,
+        [
+            "pan",
+            "-g", str(orthogroups_path),
+            "-m", str(gene_genome_path),
+            "-o", str(output_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    summary_text = (output_dir / "pan_genome_summary.tsv").read_text(encoding="utf-8")
+    rows = {
+        line.split("\t")[0]: line.split("\t")[1]
+        for line in summary_text.strip().splitlines()[1:]
+    }
+    assert rows["core"] == "1"
+    assert rows["single-copy-core"] == "0"
 
 
 def test_pan_writes_presence_absence_matrix_with_copy_numbers(tmp_path):
