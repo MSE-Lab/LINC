@@ -92,6 +92,10 @@ class PipelineConfig:
     # 纯性能参数, 不影响算法结果, 已在 `_check_config_consistency` 中排除,
     # 不参与 resume/append 的参数一致性校验(修改线程数不应触发强制重算)。
     threads: int = 0
+    # 新增(2026-10-04, 与用户确认): 搜索阶段(mmseqs/diamond)的 evalue 阈值,
+    # 即 aligner 的 -e 参数, 决定"哪些 hit 会被搜出来"。语义参数, 影响结果,
+    # 纳入一致性校验(不加进 non_semantic_fields)。
+    search_evalue: float = 1e-5
     # 调试出口(2026-10-03 与用户确认): 非空时, GlobalJoinStage/SSNBuilderStage
     # 会把 cutoff 过滤之前的全部原始比对 hit(含低 identity 的)落盘到该目录,
     # 供离线 RBB 等验证脚本使用。纯调试参数, 不改变任何算法逻辑, 不影响结果,

@@ -77,7 +77,7 @@ def _build_clustering(output_dir: str):
     return MCLClustering(MCLConfig(work_dir=mcl_work_dir))
 
 
-def _build_aligner(aligner_backend: str, threads: int, output_dir: str):
+def _build_aligner(aligner_backend: str, threads: int, output_dir: str, evalue: float):
     """根据 --aligner 取值构造真实比对后端实例。
 
     独立成函数以便测试通过 monkeypatch 注入 MockAligner(2026-10-02 与用户
@@ -87,10 +87,10 @@ def _build_aligner(aligner_backend: str, threads: int, output_dir: str):
     """
     if aligner_backend == "mmseqs":
         work_dir = os.path.join(output_dir, ".linc_work", "mmseqs_db")
-        return MMseqsAligner(MMseqsConfig(threads=threads, work_dir=work_dir))
+        return MMseqsAligner(MMseqsConfig(threads=threads, work_dir=work_dir, evalue=evalue))
     if aligner_backend == "diamond":
         work_dir = os.path.join(output_dir, ".linc_work", "diamond_db")
-        return DiamondAligner(DiamondConfig(threads=threads, work_dir=work_dir))
+        return DiamondAligner(DiamondConfig(threads=threads, work_dir=work_dir, evalue=evalue))
     return None
 
 
@@ -447,12 +447,28 @@ def run(
         help="Number of threads for mmseqs/diamond. 0 lets the tool use its own default "
              "(all cores).",
     ),
+    evalue: float = typer.Option(
+        1e-5, "--evalue",
+        help="E-value threshold for the search stage (mmseqs/diamond): only hits with "
+             "e-value <= this value are returned by the aligner. Higher values are more "
+             "permissive (more divergent homologs, slower); lower values are stricter "
+             "(faster, fewer hits). This is a semantic parameter and affects results.",
+    ),
     edge_completion_mode: str = typer.Option(
         "representative_member", "--edge-completion-mode",
         help="SSN edge completion strategy: none (representative-representative edges only), "
              "representative_member (default, adds representative-member edges at no extra "
              "alignment cost), or full (adds all member-member edges within a cluster; "
              "cross-genome pairs require new alignments and can be slow for large clusters).",
+    ),
+    touch_evalue: Optional[float] = typer.Option(
+        None, "--touch-evalue",
+        help="E-value threshold for the 'touching' criterion used by --edge-completion-mode "
+             "full: a global cluster whose representative hits a genome below this e-value is "
+             "marked as 'touching' that genome, so its members get cross-compared even if the "
+             "hit is too weak to merge. None (default) treats every search hit as touching "
+             "(maximally relaxed); set a smaller value (e.g. 1e-10) to tighten it and reduce "
+             "full-stage cost.",
     ),
     mega_cluster_warning_threshold: Optional[int] = typer.Option(
         None, "--mega-cluster-warning-threshold",
@@ -486,15 +502,6 @@ def run(
         help="Debug-only: dump all raw alignment hits (before the identity/coverage cutoff) "
              "from the join and full-completion stages into this directory, as TSV files "
              "raw_join_hits.tsv and raw_full_hits.tsv. Does not change any clustering logic.",
-    ),
-    touch_evalue: Optional[float] = typer.Option(
-        None, "--touch-evalue",
-        help="E-value threshold for the 'touching' criterion used by --edge-completion-mode "
-             "full: a global cluster whose representative hits a genome below this e-value is "
-             "marked as 'touching' that genome, so its members get cross-compared even if the "
-             "hit is too weak to merge. None (default) treats every search hit as touching "
-             "(maximally relaxed); set a smaller value (e.g. 1e-10) to tighten it and reduce "
-             "full-stage cost.",
     ),
     force: bool = typer.Option(
         False, "--force",
@@ -539,6 +546,24 @@ def run(
             fg=typer.colors.RED, err=True,
         )
         raise typer.Exit(code=1)
+    if evalue <= 0:
+        typer.secho(
+            f"--evalue 必须 > 0, 当前为: {evalue}",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+    if touch_evalue is not None and touch_evalue <= 0:
+        typer.secho(
+            f"--touch-evalue 必须 > 0(或省略表示最宽松), 当前为: {touch_evalue}",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+    if touch_evalue is not None and touch_evalue >= evalue:
+        typer.secho(
+            f"警告: --touch-evalue ({touch_evalue}) >= --evalue ({evalue}), "
+            "接触判据不会比搜索阶段更严格, 该选项将不起实际收紧效果。",
+            fg=typer.colors.YELLOW, err=True,
+        )
     if edge_completion_mode not in VALID_EDGE_COMPLETION_MODES:
         typer.secho(
             f"--edge-completion-mode 取值非法: {edge_completion_mode}"
@@ -613,7 +638,7 @@ def run(
 
     try:
         try:
-            aligner = _build_aligner(aligner_backend, threads, output_dir)
+            aligner = _build_aligner(aligner_backend, threads, output_dir, evalue)
         except RuntimeError as exc:
             # 工程审查问题4(2026-10-03 与用户确认): 缺失外部二进制(如 mmseqs/
             # diamond 未安装)时, 构造函数会抛出 RuntimeError, 这里统一兜底为
@@ -717,6 +742,7 @@ def run(
                 threads=threads,
                 dump_raw_hits=dump_raw_hits,
                 touch_evalue=touch_evalue,
+                search_evalue=evalue,
             ),
         )
 
