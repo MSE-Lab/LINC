@@ -131,7 +131,10 @@ def _table(headers: List[str], rows: List[List[Any]],
            num_cols: Optional[List[int]] = None) -> str:
     """渲染表格; num_cols 指定需要右对齐的列索引(从 0 开始)。"""
     num_cols = num_cols or []
-    head = "".join(f"<th>{h}</th>" for h in headers)
+    head = "".join(
+        f'<th class="num">{h}</th>' if i in num_cols else f"<th>{h}</th>"
+        for i, h in enumerate(headers)
+    )
     body = []
     for row in rows:
         cells = []
@@ -255,7 +258,7 @@ def build_report_html(state: LoadedState, data: ReportData) -> str:
           box-shadow: 0 1px 2px rgba(16,24,40,.04); }
   .card-value { font-size: 24px; font-weight: 650; font-variant-numeric: tabular-nums; }
   .card-label { font-size: 12px; color: var(--muted); margin-top: 3px; }
-  .figure-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .figure-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }
   .figure-grid.wide { grid-template-columns: 1fr; }
   figure { margin: 0; background: var(--card-bg); border: 1px solid var(--border);
            border-radius: 8px; padding: 12px; }
@@ -272,7 +275,7 @@ def build_report_html(state: LoadedState, data: ReportData) -> str:
   tbody td { padding: 7px 12px; border-bottom: 1px solid #f0f2f5; }
   tbody tr:nth-child(even) { background: #fafbfc; }
   tbody tr:hover { background: #f0f5fa; }
-  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
   ul.links { columns: 2; list-style: none; padding: 0; margin: 0; }
   ul.links li { margin: 4px 0; }
   ul.links a { color: var(--accent-light); text-decoration: none;
