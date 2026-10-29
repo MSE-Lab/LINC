@@ -40,11 +40,20 @@ def select_families(state: LoadedState, family_ids: Optional[List[str]] = None,
 
 
 def _build_elements(state: LoadedState, data: ReportData,
-                    families: List[Any], genome_colors: Dict[str, str]) -> Tuple[List[dict], List[dict]]:
-    """构建 Cytoscape 元素(nodes/edges)。node id 用原始序列 ID, 全局唯一。"""
+                    families: List[Any], genome_colors: Dict[str, str]) -> Tuple[List[dict], List[dict], int, int]:
+    """构建 Cytoscape 元素(nodes/edges)。node id 用原始序列 ID, 全局唯一。
+
+    只保留 degree > 0 的基因: collapsed 模式下折叠基因在代表图里无边,
+    排除它们以避免大量孤立节点; full_graph 模式下孤立基因(singleton)同理。
+    返回 (nodes, edges, shown, total), 其中 total 为所选家族的全部基因数。
+    """
     node_ids: Set[str] = set()
+    total_genes = 0
     for fam in families:
-        node_ids |= fam.member_genes
+        for gene_id in fam.member_genes:
+            total_genes += 1
+            if data.degree.get(gene_id, 0) > 0:
+                node_ids.add(gene_id)
 
     nodes = []
     for gene_id in sorted(node_ids):
@@ -76,11 +85,11 @@ def _build_elements(state: LoadedState, data: ReportData,
                         "coverage": round(e.coverage, 4),
                     },
                 })
-    return nodes, edges
+    return nodes, edges, len(nodes), total_genes
 
 
 def _cytoscape_html(title: str, nodes: List[dict], edges: List[dict],
-                    genome_names: List[str]) -> str:
+                    genome_names: List[str], note: str = "") -> str:
     """生成自包含 Cytoscape.js HTML。"""
     elements = json.dumps([{"data": n["data"]} for n in nodes]
                           + [{"data": e["data"]} for e in edges],
@@ -101,11 +110,14 @@ def _cytoscape_html(title: str, nodes: List[dict], edges: List[dict],
 <title>%s</title>
 <script src="%s"></script>
 <style>
-  body { font-family: sans-serif; margin: 0; }
-  #toolbar { padding: 8px; border-bottom: 1px solid #ccc; background: #fafafa; }
+  body { font-family: sans-serif; margin: 0; display: flex; flex-direction: column; height: 100vh; }
+  #toolbar { padding: 8px; border-bottom: 1px solid #ccc; background: #fafafa; flex: 0 0 auto; }
   #toolbar button, #toolbar select { margin-right: 10px; }
-  #cy { position: absolute; top: 52px; bottom: 0; left: 0; right: 0; }
-  #info { position: absolute; top: 60px; right: 10px; background: white;
+  #note { padding: 4px 8px; font-size: 11px; color: #7a5c00; background: #fffbe6;
+          border-bottom: 1px solid #eee; flex: 0 0 auto; }
+  #note:empty { display: none; }
+  #cy { flex: 1 1 auto; }
+  #info { position: absolute; top: 96px; right: 10px; background: white;
           border: 1px solid #ccc; padding: 8px; max-width: 360px; font-size: 12px; }
   #legend { position: absolute; bottom: 10px; left: 10px; background: white;
             border: 1px solid #ccc; padding: 8px; font-size: 12px; line-height: 1.6; }
@@ -123,6 +135,7 @@ def _cytoscape_html(title: str, nodes: List[dict], edges: List[dict],
   </label>
   <label><input type="checkbox" id="label-toggle" checked onchange="toggleLabels(this.checked)"> labels</label>
 </div>
+<div id="note">%s</div>
 <div id="cy"></div>
 <div id="info">Click a node for details</div>
 <div id="legend">%s</div>
@@ -178,7 +191,7 @@ cy.on('tap', 'node', function(evt) {
 </script>
 </body>
 </html>
-""" % (title, _CYTOSCAPE_CDN, genome_options, legend_items, elements)
+""" % (title, _CYTOSCAPE_CDN, genome_options, note, legend_items, elements)
 
 
 def _graphml_xml(state: LoadedState, families: List[Any],
@@ -222,12 +235,17 @@ def render_ssn_html(state: LoadedState, data: ReportData, report_dir: str,
     families = select_families(state, family_ids)
     genome_names = sorted(state.genome_id_to_name.values())
     genome_colors = _genome_colors(genome_names)
-    nodes, edges = _build_elements(state, data, families, genome_colors)
+    nodes, edges, shown, total = _build_elements(state, data, families, genome_colors)
+
+    note = ""
+    if shown < total:
+        note = (f"{total - shown} of {total} genes are not shown "
+                f"(no SSN edges; folded or singleton genes).")
 
     title = "LINC SSN - " + (
         ", ".join(f.family_id for f in families) if family_ids else "top families"
     )
-    html = _cytoscape_html(title, nodes, edges, genome_names)
+    html = _cytoscape_html(title, nodes, edges, genome_names, note)
     with open(os.path.join(report_dir, "ssn.html"), "w", encoding="utf-8") as fh:
         fh.write(html)
     written.append("ssn.html")
