@@ -153,8 +153,25 @@ def _pan_genome_table(data: ReportData) -> str:
     rows = []
     for cat in ("core", "soft-core", "shell", "cloud", "singleton"):
         c = data.pan_genome["categories"][cat]
-        rows.append([cat, c["n_families"], c["family_pct"], c["n_genes"], c["gene_pct"]])
-    return _table(headers, rows, num_cols=[1, 2, 3, 4])
+        rows.append([
+            cat, c["n_families"],
+            f"{c['family_pct'] * 100:.2f}%",
+            c["n_genes"],
+            f"{c['gene_pct'] * 100:.2f}%",
+        ])
+    # single-copy-core 是 core 的子集, 单独一行(百分比分母为 core, 而非总数)。
+    n_core = data.pan_genome["categories"]["core"]["n_families"]
+    n_sc = data.pan_genome["n_single_copy_core"]
+    n_genomes = data.counts["n_genomes"]
+    n_genes = data.counts["n_genes"]
+    sc_families_pct = f"{n_sc / n_core * 100:.2f}% of core" if n_core else "—"
+    sc_genes = n_sc * n_genomes
+    sc_genes_pct = f"{sc_genes / n_genes * 100:.2f}%" if n_genes else "—"
+    rows.append(["single-copy-core*", n_sc, sc_families_pct, sc_genes, sc_genes_pct])
+    table = _table(headers, rows, num_cols=[1, 2, 3, 4])
+    note = ('<p class="note">* single-copy-core is a subset of core (core families '
+            'with exactly one copy per genome); its Families % is relative to core.</p>')
+    return table + note
 
 
 def _top_families_table(data: ReportData) -> str:
@@ -276,6 +293,7 @@ def build_report_html(state: LoadedState, data: ReportData) -> str:
   tbody tr:nth-child(even) { background: #fafbfc; }
   tbody tr:hover { background: #f0f5fa; }
   th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  p.note { font-size: 12px; color: var(--muted); margin-top: 8px; }
   ul.links { columns: 2; list-style: none; padding: 0; margin: 0; }
   ul.links li { margin: 4px 0; }
   ul.links a { color: var(--accent-light); text-decoration: none;
