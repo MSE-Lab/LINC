@@ -345,6 +345,51 @@ def test_resume_skips_config_check_with_warning_when_no_historical_config(tmp_pa
     different_pipeline.resume([str(file_path)])
 
 
+def _strip_new_fields_from_saved_config(repo) -> None:
+    config = repo.load_config()
+    for key in ("family_mode", "search_evalue", "touch_evalue"):
+        config.pop(key, None)
+    repo.save_config(config)
+
+
+def test_resume_treats_missing_evalue_fields_in_old_config_as_defaults(tmp_path):
+    """旧 config 缺 family_mode/search_evalue/touch_evalue 时, 本次使用默认值
+    不应被误报为参数不一致。"""
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    file_path = input_dir / "g1.faa"
+    _write_fasta(str(file_path), [("x", "MKV")])
+
+    repo = FileRepository(str(tmp_path / "state"))
+    _make_pipeline(repo).run([str(file_path)])
+    _strip_new_fields_from_saved_config(repo)
+
+    _make_pipeline(repo).resume([str(file_path)])
+
+
+def test_resume_still_detects_non_default_search_evalue_with_old_config(tmp_path):
+    """旧 config 缺字段按默认值补齐后, 本次若 search_evalue 非默认值仍应报不一致。"""
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    file_path = input_dir / "g1.faa"
+    _write_fasta(str(file_path), [("x", "MKV")])
+
+    repo = FileRepository(str(tmp_path / "state"))
+    _make_pipeline(repo).run([str(file_path)])
+    _strip_new_fields_from_saved_config(repo)
+
+    different_pipeline = Pipeline(
+        aligner=MockAligner(),
+        clustering_for_intra=UnionFindClustering(),
+        clustering_for_mcl=UnionFindClustering(),
+        repository=repo,
+        config=PipelineConfig(search_evalue=1e-3),
+    )
+    with pytest.raises(ConfigMismatchError) as exc_info:
+        different_pipeline.resume([str(file_path)])
+    assert "search_evalue" in str(exc_info.value)
+
+
 def test_resume_force_ignores_stale_cache_and_recomputes_intra(tmp_path):
     """force 风险修复回归测试(2026-10-03 与用户确认, 风险1): --resume
     --force 时, 不能只放行参数校验却继续复用旧参数算出的 intra_results/

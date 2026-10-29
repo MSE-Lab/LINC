@@ -199,9 +199,11 @@ class Pipeline:
         # (传给 mcl 的 `-te` 线程数), 不影响算法结果, 修改它不应被视为
         # "参数不一致"而触发 ConfigMismatchError/强制重算。
         non_semantic_fields = {"threads", "dump_raw_hits"}
-        # 旧版 config 不含 family_mode 时按默认值(full_graph)视为一致。
+        # 旧版 config 不含 family_mode / search_evalue / touch_evalue 时按默认值视为一致。
         historical_config = dict(historical_config)
         historical_config.setdefault("family_mode", "full_graph")
+        historical_config.setdefault("search_evalue", 1e-5)
+        historical_config.setdefault("touch_evalue", None)
         mismatched = {
             key: (historical_config.get(key), current_config[key])
             for key in current_config
