@@ -301,8 +301,11 @@ class Pipeline:
         loaded_genomes: Dict[str, Genome],
         intra_results: Dict[str, GenomeIntraResult],
         join_result: IncrementalResult,
+        collapse_map: Optional[Dict[str, str]] = None,
     ) -> CompleteSSN:
         config = self._config
+        if collapse_map is None:
+            collapse_map = self._collapse_map(intra_results, join_result)
         ssn_stage = SSNBuilderStage(
             aligner=self._aligner,
             edge_completion_mode=config.edge_completion_mode,
@@ -312,7 +315,7 @@ class Pipeline:
             cov_mode=config.cov_mode,
             cleanup_intermediate=not config.keep_intermediate,
             dump_raw_hits=config.dump_raw_hits,
-            collapsed_genes=set(self._collapse_map(intra_results, join_result)),
+            collapsed_genes=set(collapse_map),
         )
         return ssn_stage.run(loaded_genomes, intra_results, join_result)
 
@@ -335,8 +338,11 @@ class Pipeline:
         complete_ssn: CompleteSSN,
         intra_results: Dict[str, GenomeIntraResult],
         join_result: IncrementalResult,
+        collapse_map: Optional[Dict[str, str]] = None,
     ) -> List[OrthologFamily]:
         config = self._config
+        if collapse_map is None:
+            collapse_map = self._collapse_map(intra_results, join_result)
         family_stage = FamilyRefineStage(
             clustering=self._clustering_for_mcl,
             inflation=config.inflation,
@@ -357,7 +363,7 @@ class Pipeline:
         return family_stage.run(
             complete_ssn,
             all_gene_ids=all_gene_ids,
-            collapse_map=self._collapse_map(intra_results, join_result),
+            collapse_map=collapse_map,
         )
 
     def run(self, genome_files: List[str]) -> PipelineResult:
@@ -377,10 +383,16 @@ class Pipeline:
         join_result = self._run_join(loaded_genomes, intra_results)
         self._repository.save_join_result(join_result)
 
-        complete_ssn = self._run_ssn(loaded_genomes, intra_results, join_result)
+        collapse_map = self._collapse_map(intra_results, join_result)
+
+        complete_ssn = self._run_ssn(
+            loaded_genomes, intra_results, join_result, collapse_map
+        )
         self._repository.save_complete_ssn(complete_ssn)
 
-        families = self._run_family(complete_ssn, intra_results, join_result)
+        families = self._run_family(
+            complete_ssn, intra_results, join_result, collapse_map
+        )
         self._repository.save_families(families)
 
         # 工程审查问题1(2026-10-03 与用户确认; 2026-10-03 再次确认挪到末尾):
@@ -440,14 +452,26 @@ class Pipeline:
         else:
             join_result = repo.load_join_result()
 
-        if forced_override or not repo.has_complete_ssn():
-            complete_ssn = self._run_ssn(loaded_genomes, intra_results, join_result)
+        need_ssn = forced_override or not repo.has_complete_ssn()
+        need_families = forced_override or not repo.has_families()
+        collapse_map = (
+            self._collapse_map(intra_results, join_result)
+            if (need_ssn or need_families)
+            else {}
+        )
+
+        if need_ssn:
+            complete_ssn = self._run_ssn(
+                loaded_genomes, intra_results, join_result, collapse_map
+            )
             repo.save_complete_ssn(complete_ssn)
         else:
             complete_ssn = repo.load_complete_ssn()
 
-        if forced_override or not repo.has_families():
-            families = self._run_family(complete_ssn, intra_results, join_result)
+        if need_families:
+            families = self._run_family(
+                complete_ssn, intra_results, join_result, collapse_map
+            )
             repo.save_families(families)
         else:
             families = repo.load_families()
@@ -530,8 +554,13 @@ class Pipeline:
             # 生效), 只是收益打了折扣, 留待后续按需实现
             # `initial_touching_map` 接续。
 
-        complete_ssn = self._run_ssn(merged_loaded, merged_intra_results, join_result)
-        families = self._run_family(complete_ssn, merged_intra_results, join_result)
+        collapse_map = self._collapse_map(merged_intra_results, join_result)
+        complete_ssn = self._run_ssn(
+            merged_loaded, merged_intra_results, join_result, collapse_map
+        )
+        families = self._run_family(
+            complete_ssn, merged_intra_results, join_result, collapse_map
+        )
 
         # 注意: `-i` 对应的 input_signature 不随 append 变化(`-i` 始终代表
         # 历史基础数据集, 只有 `-a` 每次追加的新目录才变化, 2026-10-02 与
