@@ -289,10 +289,11 @@ def test_keep_intermediate_skips_cleanup(monkeypatch):
     assert cleanup_calls["n"] == 0
 
 
-def test_edge_completion_mode_none_drops_all_pairwise_hits():
-    """性能优化空间第2项(2026-10-03 与用户确认): edge_completion_mode="none"
-    时下游 SSNBuilderStage 完全不读取 pairwise_hits, 应直接裁剪为空列表,
-    避免无用数据占用内存/落盘空间。
+def test_edge_completion_mode_none_keeps_representative_hits():
+    """edge_completion_mode="none" 下 SSNBuilderStage 不读取 pairwise_hits,
+    但 family_mode=collapsed 的折叠映射需要"局部代表-成员"相似度来挑选最相似
+    的锚点代表, 因此与 representative_member 一样保留至少一端是局部代表的
+    hit(不再裁剪为空)。
     """
     g1, g2, g3 = (_make_gene("g1", i) for i in range(1, 4))
     aligner = MockAligner()
@@ -303,7 +304,10 @@ def test_edge_completion_mode_none_drops_all_pairwise_hits():
 
     result = _stage(aligner, cutoff_i=0.5, edge_completion_mode="none").run(genome)
 
-    assert result.pairwise_hits == []
+    assert result.pairwise_hits != []
+    representative_set = set(result.local_representatives)
+    for hit in result.pairwise_hits:
+        assert hit.query_id in representative_set or hit.subject_id in representative_set
     # 裁剪只影响持久化数据, 不应影响聚类/代表选取本身的正确性。
     assert result.n_clusters == 2
 

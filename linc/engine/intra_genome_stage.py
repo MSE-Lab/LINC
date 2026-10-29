@@ -278,13 +278,12 @@ class IntraGenomeStage:
         """按 `edge_completion_mode` 裁剪待持久化的 `pairwise_hits`(性能优化
         空间第2项, 2026-10-03 与用户确认)。
 
-        - none: 下游 SSNBuilderStage 完全不读取该数据, 不需要收集;
-        - representative_member: 下游只在"代表-成员"补边分支里复用, 只保留
-          至少一端是局部代表的 hit;
+        - none / representative_member: 只保留至少一端是局部代表的 hit。
+          representative_member 下游在"代表-成员"补边分支里复用; none 下
+          SSNBuilderStage 不读取, 但 family_mode=collapsed 的折叠映射需要
+          "局部代表-成员"的相似度来挑选最相似的锚点代表, 因此同样保留;
         - full: 下游"同局部簇跨成员-成员"补边分支需要全量, 不裁剪。
         """
-        if self._edge_completion_mode == "none":
-            return []
         if self._edge_completion_mode == "full":
             return pairwise_hits
         representative_set = set(local_representatives)
