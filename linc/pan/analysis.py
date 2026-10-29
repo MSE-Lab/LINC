@@ -21,6 +21,21 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 PAN_CATEGORIES = ["core", "soft-core", "shell", "cloud", "singleton"]
 
+# 簇/家族大小分箱边界(供 cluster_size_distribution 与 mcl_before_after 共用)。
+SIZE_BINS = [
+    ("1", 1, 1), ("2", 2, 2), ("3-5", 3, 5), ("6-10", 6, 10),
+    ("11-20", 11, 20), ("21-50", 21, 50), ("51-100", 51, 100),
+    ("101-500", 101, 500), ("501+", 501, None),
+]
+
+
+def bin_sizes(sizes: List[int]) -> List[Tuple[str, int]]:
+    """按 `SIZE_BINS` 分箱计数, 返回 [(label, count), ...]。"""
+    return [
+        (label, sum(1 for s in sizes if s >= lo and (hi is None or s <= hi)))
+        for label, lo, hi in SIZE_BINS
+    ]
+
 
 def classify_family(n_genomes_present: int, n_total_genomes: int, n_members: int) -> str:
     """按用户确认的规则对一个直系同源家族(OG)分类:
@@ -445,15 +460,9 @@ def _graph_density(n_nodes: int, n_edges: int) -> float:
 
 
 def _size_distribution(sizes: List[int]) -> Dict[str, Any]:
-    """按 [1,2,3-5,6-10,11-20,21-50,51-100,101-500,501+] 分箱计数。"""
-    bins = [
-        ("1", 1, 1), ("2", 2, 2), ("3-5", 3, 5), ("6-10", 6, 10),
-        ("11-20", 11, 20), ("21-50", 21, 50), ("51-100", 51, 100),
-        ("101-500", 101, 500), ("501+", 501, None),
-    ]
+    """按 `SIZE_BINS` 分箱计数, 返回 {bins: [{label, n}, ...], total}。"""
     result: Dict[str, Any] = {"bins": []}
-    for label, lo, hi in bins:
-        n = sum(1 for s in sizes if s >= lo and (hi is None or s <= hi))
+    for label, n in bin_sizes(sizes):
         result["bins"].append({"label": label, "n": n})
     result["total"] = len(sizes)
     return result
