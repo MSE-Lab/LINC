@@ -171,7 +171,7 @@ def test_analyze_cloud_including_singleton_and_averages():
     core = pan["categories"]["core"]
     assert core["avg_genes_per_genome"] == 1.0  # 3 基因 / 3 基因组
     assert core["avg_families_per_genome"] == 1.0
-    assert pan["single_copy_core_pct_of_core"] == 1.0
+    assert pan["single_copy_core_ratio_of_core"] == 1.0
 
 
 def test_analyze_top_n_limits_top_lists():

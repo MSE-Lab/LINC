@@ -165,6 +165,23 @@ def _table(headers: List[str], rows: List[List[Any]],
 
 def _pan_genome_table(data: ReportData) -> str:
     headers = ["Category", "Families", "Families %", "Genes", "Genes %"]
+    # 派生行预计算: single-copy-core 是 core 的子集, cloud+singleton 是合并视图。
+    n_core = data.pan_genome["categories"]["core"]["n_families"]
+    n_sc = data.pan_genome["n_single_copy_core"]
+    n_genomes = data.counts["n_genomes"]
+    n_genes = data.counts["n_genes"]
+    sc_families_pct = f"{n_sc / n_core * 100:.2f}% of core" if n_core else "—"
+    sc_genes = n_sc * n_genomes
+    sc_genes_pct = f"{sc_genes / n_genes * 100:.2f}%" if n_genes else "—"
+    sc_row = ["single-copy-core*", n_sc, sc_families_pct, sc_genes, sc_genes_pct]
+
+    ci = data.pan_genome["cloud_including_singleton"]
+    ci_row = [
+        "cloud+singleton*", ci["n_families"],
+        f"{ci['family_pct'] * 100:.2f}%",
+        ci["n_genes"], f"{ci['gene_pct'] * 100:.2f}%",
+    ]
+
     rows = []
     for cat in ("core", "soft-core", "shell", "cloud", "singleton"):
         c = data.pan_genome["categories"][cat]
@@ -174,20 +191,12 @@ def _pan_genome_table(data: ReportData) -> str:
             c["n_genes"],
             f"{c['gene_pct'] * 100:.2f}%",
         ])
-    ci = data.pan_genome["cloud_including_singleton"]
-    rows.append([
-        "cloud+singleton*", ci["n_families"], f"{ci['family_pct'] * 100:.2f}%",
-        ci["n_genes"], f"{ci['gene_pct'] * 100:.2f}%",
-    ])
-    # single-copy-core 是 core 的子集, 单独一行(百分比分母为 core, 而非总数)。
-    n_core = data.pan_genome["categories"]["core"]["n_families"]
-    n_sc = data.pan_genome["n_single_copy_core"]
-    n_genomes = data.counts["n_genomes"]
-    n_genes = data.counts["n_genes"]
-    sc_families_pct = f"{n_sc / n_core * 100:.2f}% of core" if n_core else "—"
-    sc_genes = n_sc * n_genomes
-    sc_genes_pct = f"{sc_genes / n_genes * 100:.2f}%" if n_genes else "—"
-    rows.append(["single-copy-core*", n_sc, sc_families_pct, sc_genes, sc_genes_pct])
+        # 派生行紧跟其"父"分类: single-copy-core 在 core 后, cloud+singleton 在 singleton 后。
+        if cat == "core":
+            rows.append(list(sc_row))
+        if cat == "singleton":
+            rows.append(list(ci_row))
+
     table = _table(headers, rows, num_cols=[1, 2, 3, 4])
     note = ('<p class="note">* single-copy-core is a subset of core (core families '
             'with exactly one copy per genome); its Families % is relative to core. '

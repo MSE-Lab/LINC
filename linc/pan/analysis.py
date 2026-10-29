@@ -340,7 +340,7 @@ def analyze(state: LoadedState, top_n: int = 30) -> ReportData:
             for cat in PAN_CATEGORIES
         },
         "n_single_copy_core": n_single_copy_core,
-        "single_copy_core_pct_of_core": _ratio(n_single_copy_core, pan_counts["core"]),
+        "single_copy_core_ratio_of_core": _ratio(n_single_copy_core, pan_counts["core"]),
     }
     for cat in PAN_CATEGORIES:
         cat_stats = pan_genome["categories"][cat]
