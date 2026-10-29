@@ -68,10 +68,9 @@ def compute_collapse_map(
                     if hit.identity > pair_identity.get(key, -1.0):
                         pair_identity[key] = hit.identity
             for member in sorted(local_cluster.member_ids - set(reps)):
-                best_rep = max(
+                best_rep = min(
                     reps,
-                    key=lambda r: (pair_identity.get(frozenset((r, member)), -1.0),
-                                   [-ord(c) for c in r]),
+                    key=lambda r: (-pair_identity.get(frozenset((r, member)), -1.0), r),
                 )
                 collapse_map[member] = collapse_map[best_rep]
     return collapse_map
