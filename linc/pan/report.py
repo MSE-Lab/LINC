@@ -18,22 +18,26 @@ SUMMARY_SCHEMA = "linc-run-summary/1"
 
 
 def _fmt(value: Any) -> str:
-    """数值展示: 浮点保留 3 位, 整数/字符串原样。"""
+    """数值展示: 整数加千分位, 浮点保留 3 位, 其余原样。"""
+    if isinstance(value, bool):
+        return str(value)
     if isinstance(value, float):
-        return f"{value:.3f}"
+        return f"{value:,.3f}"
+    if isinstance(value, int):
+        return f"{value:,}"
     return str(value)
 
 
 def _warnings(state: LoadedState) -> List[str]:
     warnings: List[str] = []
     if state.complete_ssn is None:
-        warnings.append("缺少 complete_ssn.pkl, SSN 相关统计被跳过")
+        warnings.append("complete_ssn.pkl is missing; SSN statistics are skipped.")
     if not state.intra_results:
-        warnings.append("缺少 intra_results.pkl, 局部簇/代表统计被跳过")
+        warnings.append("intra_results.pkl is missing; local-cluster/representative statistics are skipped.")
     if state.join_result is None:
-        warnings.append("缺少 join_result.pkl, 全局簇统计被跳过")
+        warnings.append("join_result.pkl is missing; global-cluster statistics are skipped.")
     if not state.config:
-        warnings.append("缺少 config.pkl, 参数信息缺失")
+        warnings.append("config.pkl is missing; parameter information is unavailable.")
     return warnings
 
 
@@ -63,6 +67,21 @@ def build_run_summary(state: LoadedState, data: ReportData,
 # ---------------------------------------------------------------------------
 # report.html
 # ---------------------------------------------------------------------------
+def _card(label: str, value: Any) -> str:
+    return (
+        f'<div class="card"><div class="card-value">{_fmt(value)}</div>'
+        f'<div class="card-label">{label}</div></div>'
+    )
+
+
+def _card_group(title: str, items: List[tuple]) -> str:
+    cards = "\n".join(_card(label, value) for label, value in items)
+    return (
+        f'<div class="card-group"><h3>{title}</h3>'
+        f'<div class="cards">{cards}</div></div>'
+    )
+
+
 def _cards_html(data: ReportData) -> str:
     c = data.counts
     d = data.derived
@@ -70,85 +89,119 @@ def _cards_html(data: ReportData) -> str:
     f = data.families
     m = data.mcl
     p = data.pan_genome["categories"]
-    cards = [
-        ("Genomes", c["n_genomes"]),
-        ("Genes", c["n_genes"]),
-        ("Avg genes per genome", d["avg_genes_per_genome"]),
-        ("Local representatives", c["n_local_representatives"]),
-        ("Avg local reps per genome", d["avg_local_reps_per_genome"]),
-        ("Global clusters", c["n_global_clusters"]),
-        ("Global representatives", c["n_global_representatives"]),
-        ("Avg global reps per cluster", d["avg_global_reps_per_cluster"]),
-        ("SSN nodes", s["n_nodes"]),
-        ("SSN edges", s["n_edges"]),
-        ("SSN components", s["n_components"]),
-        ("Largest component", d["largest_component_size"]),
-        ("Isolated genes", s["n_isolated_nodes"]),
-        ("MCL families", c["n_families"]),
-        ("Singleton families", f["n_singleton"]),
-        ("Median family size", f["median_size"]),
-        ("Largest family", f["max_size"]),
-        ("Components split by MCL", m["n_components_split"]),
-        ("Core genes", p["core"]["n_genes"]),
-        ("Soft-core genes", p["soft-core"]["n_genes"]),
-        ("Shell genes", p["shell"]["n_genes"]),
-        ("Cloud genes", p["cloud"]["n_genes"]),
+
+    groups = [
+        ("Dataset", [
+            ("Genomes", c["n_genomes"]),
+            ("Genes", c["n_genes"]),
+            ("Avg genes per genome", d["avg_genes_per_genome"]),
+        ]),
+        ("Representatives", [
+            ("Local representatives", c["n_local_representatives"]),
+            ("Avg local reps per genome", d["avg_local_reps_per_genome"]),
+            ("Global clusters", c["n_global_clusters"]),
+            ("Global representatives", c["n_global_representatives"]),
+            ("Avg global reps per cluster", d["avg_global_reps_per_cluster"]),
+        ]),
+        ("Sequence similarity network", [
+            ("SSN nodes", s["n_nodes"]),
+            ("SSN edges", s["n_edges"]),
+            ("SSN components", s["n_components"]),
+            ("Largest component", d["largest_component_size"]),
+            ("Isolated genes", s["n_isolated_nodes"]),
+        ]),
+        ("Families (MCL)", [
+            ("MCL families", c["n_families"]),
+            ("Singleton families", f["n_singleton"]),
+            ("Median family size", f["median_size"]),
+            ("Largest family", f["max_size"]),
+            ("Components split by MCL", m["n_components_split"]),
+        ]),
+        ("Pan-genome", [
+            ("Core genes", p["core"]["n_genes"]),
+            ("Soft-core genes", p["soft-core"]["n_genes"]),
+            ("Shell genes", p["shell"]["n_genes"]),
+            ("Cloud genes", p["cloud"]["n_genes"]),
+        ]),
     ]
-    items = "\n".join(
-        f'<div class="card"><div class="card-value">{_fmt(v)}</div>'
-        f'<div class="card-label">{label}</div></div>'
-        for label, v in cards
-    )
-    return f'<div class="cards">{items}</div>'
+    return "\n".join(_card_group(title, items) for title, items in groups)
 
 
-def _table(headers: List[str], rows: List[List[Any]]) -> str:
+def _table(headers: List[str], rows: List[List[Any]],
+           num_cols: Optional[List[int]] = None) -> str:
+    """渲染表格; num_cols 指定需要右对齐的列索引(从 0 开始)。"""
+    num_cols = num_cols or []
     head = "".join(f"<th>{h}</th>" for h in headers)
-    body = "\n".join(
-        "<tr>" + "".join(f"<td>{_fmt(c)}</td>" for c in row) + "</tr>"
-        for row in rows
+    body = []
+    for row in rows:
+        cells = []
+        for i, cell in enumerate(row):
+            cls = ' class="num"' if i in num_cols else ""
+            cells.append(f"<td{cls}>{_fmt(cell)}</td>")
+        body.append("<tr>" + "".join(cells) + "</tr>")
+    return (
+        '<table><thead><tr>' + head + '</tr></thead><tbody>'
+        + "\n".join(body) + '</tbody></table>'
     )
-    return f'<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>'
+
+
+def _pan_genome_table(data: ReportData) -> str:
+    headers = ["Category", "Families", "Families %", "Genes", "Genes %"]
+    rows = []
+    for cat in ("core", "soft-core", "shell", "cloud", "singleton"):
+        c = data.pan_genome["categories"][cat]
+        rows.append([cat, c["n_families"], c["family_pct"], c["n_genes"], c["gene_pct"]])
+    return _table(headers, rows, num_cols=[1, 2, 3, 4])
 
 
 def _top_families_table(data: ReportData) -> str:
-    headers = ["family", "size", "genomes", "density", "category", "representative"]
+    headers = ["Family", "Size", "Genomes", "Density", "Category", "Representative"]
     rows = [[f["family_id"], f["size"], f["n_genomes"], f["edge_density"],
              f["category"], f["representative"]] for f in data.top_families]
-    return _table(headers, rows)
+    return _table(headers, rows, num_cols=[1, 2, 3])
 
 
 def _top_components_table(data: ReportData) -> str:
-    headers = ["component", "genes", "families"]
+    headers = ["Component", "Genes", "Families"]
     rows = [[c["component_id"], c["n_genes"], c["n_families"]]
             for c in data.top_components]
-    return _table(headers, rows)
+    return _table(headers, rows, num_cols=[1, 2])
 
 
 def _genome_table(state: LoadedState, data: ReportData) -> str:
-    headers = ["genome", "genes", "families", "singleton genes"]
+    headers = ["Genome", "Genes", "Families", "Singleton genes"]
     rows = []
     for gid in sorted(state.genomes.keys()):
         name = state.genome_id_to_name.get(gid, gid)
         g = data.genomes.get(gid, {})
         rows.append([name, g.get("n_genes", 0), g.get("n_families", 0),
                      g.get("n_singleton_genes", 0)])
-    return _table(headers, rows[:100])
+    return _table(headers, rows[:100], num_cols=[1, 2, 3])
 
 
 def _params_table(state: LoadedState) -> str:
-    headers = ["parameter", "value"]
+    headers = ["Parameter", "Value"]
     rows = [[k, v] for k, v in sorted(state.config.items())]
     return _table(headers, rows)
+
+
+def _figure(src: str, caption: str) -> str:
+    return (
+        f'<figure><img src="{src}" alt="{caption}">'
+        f'<figcaption>{caption}</figcaption></figure>'
+    )
 
 
 def build_report_html(state: LoadedState, data: ReportData) -> str:
     """生成自包含 report.html(除 ssn.html 的 Cytoscape CDN 外无外部依赖)。"""
     cards = _cards_html(data)
+    pan_table = _pan_genome_table(data)
     top_families = _top_families_table(data)
     top_components = _top_components_table(data)
     genome_table = _genome_table(state, data)
     params_table = _params_table(state)
+
+    generated_at = datetime.now().isoformat(timespec="seconds")
 
     links = "\n".join(
         f'<li><a href="{name}">{name}</a></li>'
@@ -161,71 +214,158 @@ def build_report_html(state: LoadedState, data: ReportData) -> str:
         )
     )
 
-    warnings = "".join(f"<li>{w}</li>" for w in _warnings(state)) or "<li>无</li>"
+    warnings = "".join(f"<li>{w}</li>" for w in _warnings(state))
 
     template = """<!DOCTYPE html>
-<html lang="zh">
+<html lang="en">
 <head>
 <meta charset="utf-8">
-<title>LINC 运行报告</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LINC Run Report</title>
 <style>
-  body { font-family: sans-serif; margin: 20px; color: #222; }
-  h1 { font-size: 22px; } h2 { font-size: 16px; border-bottom: 1px solid #ccc; padding-bottom: 4px; }
-  .cards { display: flex; flex-wrap: wrap; gap: 10px; }
-  .card { border: 1px solid #ddd; border-radius: 6px; padding: 10px 14px; min-width: 130px; }
-  .card-value { font-size: 20px; font-weight: bold; }
-  .card-label { font-size: 12px; color: #666; }
-  table { border-collapse: collapse; margin: 8px 0; }
-  th, td { border: 1px solid #ddd; padding: 4px 8px; font-size: 12px; text-align: left; }
-  th { background: #f5f5f5; }
-  img { max-width: 100%; border: 1px solid #eee; margin: 6px 0; }
-  iframe { width: 100%; height: 600px; border: 1px solid #ccc; }
-  .warn { color: #b8860b; }
+  :root {
+    --accent: #1b4f72;
+    --accent-light: #2980b9;
+    --bg: #f5f7fa;
+    --card-bg: #ffffff;
+    --border: #dfe3e8;
+    --text: #1a1d21;
+    --muted: #5f6b7a;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+         Roboto, "Helvetica Neue", Arial, sans-serif; background: var(--bg);
+         color: var(--text); line-height: 1.55; }
+  header { background: linear-gradient(120deg, #14334f, #1b4f72 55%, #2980b9);
+           color: #fff; padding: 30px 40px; }
+  header h1 { margin: 0 0 6px; font-size: 26px; font-weight: 600; letter-spacing: -0.01em; }
+  header .subtitle { font-size: 14px; opacity: 0.88; }
+  header .subtitle code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                          background: rgba(255,255,255,.15); padding: 1px 6px; border-radius: 4px; }
+  main { max-width: 1080px; margin: 0 auto; padding: 28px 40px 60px; }
+  section { margin: 0 0 40px; }
+  h2 { font-size: 17px; font-weight: 600; color: var(--accent);
+       border-bottom: 2px solid var(--accent-light); padding-bottom: 6px; margin: 0 0 16px; }
+  h3 { font-size: 12px; font-weight: 600; color: var(--muted);
+       text-transform: uppercase; letter-spacing: 0.06em; margin: 0 0 10px; }
+  .card-group { margin: 0 0 18px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
+  .card { background: var(--card-bg); border: 1px solid var(--border);
+          border-radius: 8px; padding: 14px 16px;
+          box-shadow: 0 1px 2px rgba(16,24,40,.04); }
+  .card-value { font-size: 24px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .card-label { font-size: 12px; color: var(--muted); margin-top: 3px; }
+  .figure-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .figure-grid.wide { grid-template-columns: 1fr; }
+  figure { margin: 0; background: var(--card-bg); border: 1px solid var(--border);
+           border-radius: 8px; padding: 12px; }
+  figure img { width: 100%; height: auto; display: block; }
+  figure figcaption { font-size: 12px; color: var(--muted); margin-top: 8px; text-align: center; }
+  .iframe-wrap { background: var(--card-bg); border: 1px solid var(--border);
+                 border-radius: 8px; padding: 8px; }
+  iframe { width: 100%; height: 620px; border: none; display: block; }
+  .table-wrap { background: var(--card-bg); border: 1px solid var(--border);
+                border-radius: 8px; overflow: hidden; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  thead th { background: #eef2f6; color: var(--accent); text-align: left;
+             padding: 9px 12px; font-weight: 600; border-bottom: 1px solid var(--border); }
+  tbody td { padding: 7px 12px; border-bottom: 1px solid #f0f2f5; }
+  tbody tr:nth-child(even) { background: #fafbfc; }
+  tbody tr:hover { background: #f0f5fa; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  ul.links { columns: 2; list-style: none; padding: 0; margin: 0; }
+  ul.links li { margin: 4px 0; }
+  ul.links a { color: var(--accent-light); text-decoration: none;
+               font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+  ul.links a:hover { text-decoration: underline; }
+  .warnings { background: #fff8e6; border: 1px solid #f0d98c; border-radius: 8px;
+              padding: 12px 16px; color: #7a5c00; font-size: 13px; }
+  .warnings ul { margin: 0; padding-left: 18px; }
+  footer { text-align: center; color: var(--muted); font-size: 12px; padding: 20px 0; }
+  @media (max-width: 720px) { .figure-grid { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
-<h1>LINC 运行报告</h1>
+<header>
+  <h1>LINC Run Report</h1>
+  <div class="subtitle">Generated at __GENERATED_AT__ &middot; output <code>__OUTPUT_DIR__</code></div>
+</header>
 
-<h2>关键指标</h2>
-__CARDS__
+<main>
+  <section>
+    <h2>Summary</h2>
+    __CARDS__
+  </section>
 
-<h2>泛基因组分析</h2>
-<img src="pan_genome_families.svg" alt="pan-genome families">
-<img src="pan_genome_genes.svg" alt="pan-genome genes">
+  <section>
+    <h2>Pan-genome</h2>
+    <div class="figure-grid">
+      __PAN_FAMILIES__
+      __PAN_GENES__
+    </div>
+    <div class="table-wrap">__PAN_TABLE__</div>
+  </section>
 
-<h2>家族交互子图</h2>
-<iframe src="ssn.html"></iframe>
+  <section>
+    <h2>Sequence similarity network</h2>
+    <div class="iframe-wrap"><iframe src="ssn.html"></iframe></div>
+  </section>
 
-<h2>簇大小分布</h2>
-<img src="cluster_size_distribution.svg" alt="cluster size distribution">
+  <section>
+    <h2>Distributions</h2>
+    <div class="figure-grid wide">__CLUSTER_SIZE__</div>
+    <div class="figure-grid">
+      __MCL_BEFORE_AFTER__
+      __MCL_TOP_COMPONENTS__
+    </div>
+  </section>
 
-<h2>MCL 前后对比</h2>
-<img src="mcl_before_after.svg" alt="MCL before/after">
-<img src="mcl_top_components.svg" alt="MCL top components">
+  <section>
+    <h2>Top families</h2>
+    <div class="table-wrap">__TOP_FAMILIES__</div>
+  </section>
 
-<h2>Top families</h2>
-__TOP_FAMILIES__
+  <section>
+    <h2>Top connected components</h2>
+    <div class="table-wrap">__TOP_COMPONENTS__</div>
+  </section>
 
-<h2>被 MCL 拆分最多的连通分量</h2>
-__TOP_COMPONENTS__
+  <section>
+    <h2>Genomes</h2>
+    <div class="table-wrap">__GENOME_TABLE__</div>
+  </section>
 
-<h2>各基因组概况(前 100)</h2>
-__GENOME_TABLE__
+  <section>
+    <h2>Parameters</h2>
+    <div class="table-wrap">__PARAMS_TABLE__</div>
+  </section>
 
-<h2>运行参数</h2>
-__PARAMS_TABLE__
+  <section>
+    <h2>Output files</h2>
+    <ul class="links">__LINKS__</ul>
+  </section>
 
-<h2>结果文件</h2>
-<ul>__LINKS__</ul>
+  <section>
+    <h2>Warnings</h2>
+    <div class="warnings"><ul>__WARNINGS__</ul></div>
+  </section>
+</main>
 
-<h2>警告</h2>
-<ul class="warn">__WARNINGS__</ul>
+<footer>Generated by LINC pan</footer>
 </body>
 </html>
 """
     return (
         template
+        .replace("__GENERATED_AT__", generated_at)
+        .replace("__OUTPUT_DIR__", state.output_dir)
         .replace("__CARDS__", cards)
+        .replace("__PAN_FAMILIES__", _figure("pan_genome_families.svg", "Families per pan-genome category"))
+        .replace("__PAN_GENES__", _figure("pan_genome_genes.svg", "Genes per pan-genome category"))
+        .replace("__PAN_TABLE__", pan_table)
+        .replace("__CLUSTER_SIZE__", _figure("cluster_size_distribution.svg", "MCL family size distribution"))
+        .replace("__MCL_BEFORE_AFTER__", _figure("mcl_before_after.svg", "Components before vs families after MCL"))
+        .replace("__MCL_TOP_COMPONENTS__", _figure("mcl_top_components.svg", "Top components split by MCL"))
         .replace("__TOP_FAMILIES__", top_families)
         .replace("__TOP_COMPONENTS__", top_components)
         .replace("__GENOME_TABLE__", genome_table)

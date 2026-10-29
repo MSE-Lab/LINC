@@ -95,7 +95,7 @@ def _cytoscape_html(title: str, nodes: List[dict], edges: List[dict],
     )
 
     return """<!DOCTYPE html>
-<html lang="zh">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <title>%s</title>
@@ -124,7 +124,7 @@ def _cytoscape_html(title: str, nodes: List[dict], edges: List[dict],
   <label><input type="checkbox" id="label-toggle" checked onchange="toggleLabels(this.checked)"> labels</label>
 </div>
 <div id="cy"></div>
-<div id="info">点击节点查看详情</div>
+<div id="info">Click a node for details</div>
 <div id="legend">%s</div>
 <script>
 var elements = %s;
