@@ -16,6 +16,13 @@ from .ssn_html import render_ssn_html
 
 SUMMARY_SCHEMA = "linc-run-summary/1"
 
+COLLAPSED_MODE = "collapsed"
+COLLAPSED_NOTE = (
+    "family_mode=collapsed: SSN statistics are on the representative graph "
+    "(edges of folded genes were removed), so SSN node/edge counts are smaller "
+    "than the number of genes in families."
+)
+
 
 def _fmt(value: Any) -> str:
     """数值展示: 整数加千分位, 浮点保留 3 位, 其余原样。"""
@@ -38,12 +45,20 @@ def _warnings(state: LoadedState) -> List[str]:
         warnings.append("join_result.pkl is missing; global-cluster statistics are skipped.")
     if not state.config:
         warnings.append("config.pkl is missing; parameter information is unavailable.")
+    if state.config.get("family_mode") == COLLAPSED_MODE:
+        warnings.append(COLLAPSED_NOTE)
     return warnings
 
 
 def build_run_summary(state: LoadedState, data: ReportData,
                       visualization: Dict[str, Any]) -> Dict[str, Any]:
     """组装 run_summary.json 的顶层结构。"""
+    ssn = dict(data.ssn)
+    ssn["scope"] = (
+        "representative_graph"
+        if state.config.get("family_mode") == COLLAPSED_MODE
+        else "full_graph"
+    )
     return {
         "schema": SUMMARY_SCHEMA,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -51,7 +66,7 @@ def build_run_summary(state: LoadedState, data: ReportData,
         "parameters": state.config,
         "counts": data.counts,
         "derived": data.derived,
-        "ssn": data.ssn,
+        "ssn": ssn,
         "families": data.families,
         "pan_genome": data.pan_genome,
         "mcl": data.mcl,
@@ -159,6 +174,11 @@ def _pan_genome_table(data: ReportData) -> str:
             c["n_genes"],
             f"{c['gene_pct'] * 100:.2f}%",
         ])
+    ci = data.pan_genome["cloud_including_singleton"]
+    rows.append([
+        "cloud+singleton*", ci["n_families"], f"{ci['family_pct'] * 100:.2f}%",
+        ci["n_genes"], f"{ci['gene_pct'] * 100:.2f}%",
+    ])
     # single-copy-core 是 core 的子集, 单独一行(百分比分母为 core, 而非总数)。
     n_core = data.pan_genome["categories"]["core"]["n_families"]
     n_sc = data.pan_genome["n_single_copy_core"]
@@ -170,7 +190,8 @@ def _pan_genome_table(data: ReportData) -> str:
     rows.append(["single-copy-core*", n_sc, sc_families_pct, sc_genes, sc_genes_pct])
     table = _table(headers, rows, num_cols=[1, 2, 3, 4])
     note = ('<p class="note">* single-copy-core is a subset of core (core families '
-            'with exactly one copy per genome); its Families % is relative to core.</p>')
+            'with exactly one copy per genome); its Families % is relative to core. '
+            'cloud+singleton is a derived merged view of cloud and singleton.</p>')
     return table + note
 
 
@@ -401,14 +422,14 @@ def build_report_html(state: LoadedState, data: ReportData) -> str:
 # ---------------------------------------------------------------------------
 def generate_report(output_dir: str, report_dir: Optional[str] = None,
                     family_ids: Optional[List[str]] = None,
-                    graphml: bool = False) -> str:
+                    graphml: bool = False, top_n: int = 30) -> str:
     """完整生成报告, 返回报告目录路径。
 
     流程: load_state -> analyze -> write_tsvs -> render_charts ->
     render_ssn_html -> run_summary.json(两处) -> report.html。
     """
     state = load_state(output_dir)
-    data = analyze(state)
+    data = analyze(state, top_n=top_n)
 
     target = report_dir or os.path.join(output_dir, "report")
     os.makedirs(target, exist_ok=True)

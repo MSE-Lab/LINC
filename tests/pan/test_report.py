@@ -114,3 +114,24 @@ def test_generate_report_end_to_end(tmp_path):
     summary = json.loads((out / "run_summary.json").read_text(encoding="utf-8"))
     assert summary["counts"]["n_families"] == 3
     assert summary["visualization"]["report_dir"].endswith("report")
+
+
+def test_collapsed_mode_adds_scope_and_warning():
+    state = _make_state()
+    state.config["family_mode"] = "collapsed"
+    data = analyze(state)
+    summary = build_run_summary(state, data, visualization={"tsv": [], "charts": [], "ssn": []})
+
+    assert summary["ssn"]["scope"] == "representative_graph"
+    assert any("representative graph" in w for w in summary["warnings"])
+    assert "representative graph" in build_report_html(state, data)
+
+
+def test_full_graph_mode_has_full_scope_and_no_collapsed_warning():
+    state = _make_state()
+    data = analyze(state)
+    summary = build_run_summary(state, data, visualization={"tsv": [], "charts": [], "ssn": []})
+
+    assert summary["ssn"]["scope"] == "full_graph"
+    assert not any("collapsed" in w for w in summary["warnings"])
+    assert "cloud+singleton" in build_report_html(state, data)

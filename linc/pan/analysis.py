@@ -179,7 +179,7 @@ def _edge_weight_mode(config: Dict[str, Any]) -> str:
     return mode if mode in VALID_EDGE_WEIGHT_MODES else "identity_x_coverage"
 
 
-def analyze(state: LoadedState) -> ReportData:
+def analyze(state: LoadedState, top_n: int = 30) -> ReportData:
     """从 LoadedState 计算全部统计, 返回 ReportData。"""
     genomes = state.genomes
     families = state.families
@@ -326,21 +326,41 @@ def analyze(state: LoadedState) -> ReportData:
     for cat in family_category.values():
         pan_counts[cat] += 1
     total_families = len(families)
+    fams_per_genome_by_cat = {c: 0 for c in PAN_CATEGORIES}
+    for fam_id, copy_counts in presence_absence.items():
+        fams_per_genome_by_cat[family_category[fam_id]] += len(copy_counts)
     pan_genome = {
         "categories": {
             cat: {
                 "n_families": pan_counts[cat],
                 "family_pct": _ratio(pan_counts[cat], total_families),
                 "n_genes": sum(genome_breakdown[gid][cat] for gid in genome_ids),
+                "avg_families_per_genome": _ratio(fams_per_genome_by_cat[cat], n_genomes),
             }
             for cat in PAN_CATEGORIES
         },
         "n_single_copy_core": n_single_copy_core,
+        "single_copy_core_pct_of_core": _ratio(n_single_copy_core, pan_counts["core"]),
     }
     for cat in PAN_CATEGORIES:
-        pan_genome["categories"][cat]["gene_pct"] = _ratio(
-            pan_genome["categories"][cat]["n_genes"], n_genes
-        )
+        cat_stats = pan_genome["categories"][cat]
+        cat_stats["gene_pct"] = _ratio(cat_stats["n_genes"], n_genes)
+        cat_stats["avg_genes_per_genome"] = _ratio(cat_stats["n_genes"], n_genomes)
+    # 派生视图: cloud + singleton 合并(不改变基础 5 类互斥分类)。
+    cloud_cat = pan_genome["categories"]["cloud"]
+    single_cat = pan_genome["categories"]["singleton"]
+    cloud_incl_families = cloud_cat["n_families"] + single_cat["n_families"]
+    cloud_incl_genes = cloud_cat["n_genes"] + single_cat["n_genes"]
+    pan_genome["cloud_including_singleton"] = {
+        "n_families": cloud_incl_families,
+        "family_pct": _ratio(cloud_incl_families, total_families),
+        "n_genes": cloud_incl_genes,
+        "gene_pct": _ratio(cloud_incl_genes, n_genes),
+        "avg_genes_per_genome": _ratio(cloud_incl_genes, n_genomes),
+        "avg_families_per_genome": _ratio(
+            fams_per_genome_by_cat["cloud"] + fams_per_genome_by_cat["singleton"], n_genomes
+        ),
+    }
 
     # ---- 每个基因组概况 ----
     genome_stats: Dict[str, Any] = {}
@@ -363,7 +383,7 @@ def analyze(state: LoadedState) -> ReportData:
     # ---- top families / top components ----
     fam_by_size = sorted(families, key=lambda f: (-f.size, f.family_id))
     top_families = []
-    for fam in fam_by_size[:30]:
+    for fam in fam_by_size[:top_n]:
         gids = {gene_to_genome.get(m) for m in fam.member_genes} - {None}
         members = sorted(fam.member_genes)
         top_families.append({
@@ -377,7 +397,7 @@ def analyze(state: LoadedState) -> ReportData:
 
     comp_by_size = sorted(components.items(), key=lambda kv: (-len(kv[1]), kv[0]))
     top_components = []
-    for cid, members in comp_by_size[:30]:
+    for cid, members in comp_by_size[:top_n]:
         fam_ids = {gene_to_family.get(m) for m in members} - {None}
         top_components.append({
             "component_id": cid,
@@ -518,6 +538,8 @@ def write_tsvs(state: LoadedState, data: ReportData, report_dir: str) -> List[st
     n_core = data.pan_genome["categories"]["core"]["n_families"]
     sc_pct = (data.n_single_copy_core / n_core * 100) if n_core else 0.0
     rows.append(["single-copy-core", data.n_single_copy_core, f"{sc_pct:.2f}%"])
+    ci = data.pan_genome["cloud_including_singleton"]
+    rows.append(["cloud+singleton", ci["n_families"], f"{ci['family_pct'] * 100:.2f}%"])
     _write_tsv(os.path.join(report_dir, "pan_genome_summary.tsv"),
                ["Category", "N_orthogroups", "Percentage"], rows)
     written.append("pan_genome_summary.tsv")

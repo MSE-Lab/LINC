@@ -153,4 +153,28 @@ def test_write_tsvs_writes_all_nine_files(tmp_path):
     rows = {line.split("\t")[0]: line.split("\t")[1]
             for line in summary.strip().splitlines()[1:]}
     assert rows == {"core": "1", "soft-core": "0", "shell": "1",
-                    "cloud": "0", "singleton": "1", "single-copy-core": "1"}
+                    "cloud": "0", "singleton": "1", "single-copy-core": "1",
+                    "cloud+singleton": "1"}
+
+
+def test_analyze_cloud_including_singleton_and_averages():
+    data = analyze(_make_state())
+    pan = data.pan_genome
+
+    ci = pan["cloud_including_singleton"]
+    assert ci["n_families"] == 1  # cloud(0) + singleton(1)
+    assert ci["n_genes"] == 1
+    # 基础 5 类仍互斥, 合并视图不改变它们。
+    assert pan["categories"]["cloud"]["n_families"] == 0
+    assert pan["categories"]["singleton"]["n_families"] == 1
+
+    core = pan["categories"]["core"]
+    assert core["avg_genes_per_genome"] == 1.0  # 3 基因 / 3 基因组
+    assert core["avg_families_per_genome"] == 1.0
+    assert pan["single_copy_core_pct_of_core"] == 1.0
+
+
+def test_analyze_top_n_limits_top_lists():
+    data = analyze(_make_state(), top_n=1)
+    assert len(data.top_families) == 1
+    assert len(data.top_components) == 1

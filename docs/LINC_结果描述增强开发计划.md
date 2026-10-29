@@ -369,4 +369,4 @@ collapsed 模式下:
 2. 报告生成会加载较大的 pickle,几百基因组时内存和时间都不低;
 3. 交互视图只覆盖 `--family` 指定的家族,不做全图;完整 SSN 数据以 `ssn_nodes.tsv` / `ssn_edges.tsv` 为准;
 4. `run_summary.json` 由报告命令生成,不是 `linc run` 自动生成;
-5. 泛基因组分类中 Cloud 包含 singleton;singleton 和 single-copy core 是子集,不是互斥的第五类。
+5. 泛基因组分类采用 core/soft-core/shell/cloud/singleton 5 类互斥;single-copy core 是 core 的子集;`cloud+singleton` 仅是派生合并视图,不改变基础分类。

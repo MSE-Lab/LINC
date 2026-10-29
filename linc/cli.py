@@ -727,6 +727,14 @@ def pan(
         False, "--graphml",
         help="Also export the selected families' subgraph as ssn_view.graphml.",
     ),
+    top_families: int = typer.Option(
+        30, "--top-families", min=1,
+        help="Number of top families / components listed in the report.",
+    ),
+    quiet: bool = typer.Option(
+        False, "--quiet",
+        help="Suppress progress logs; only print the final report location.",
+    ),
 ) -> None:
     """Generate a read-only report from a completed `linc run` output: pan-genome
     classification, SSN/family/MCL statistics, SVG charts, an interactive family
@@ -734,6 +742,8 @@ def pan(
     _setup_logging(False)
 
     # 惰性导入: 报告模块依赖 networkx, 避免 `linc run` 启动时加载无关依赖。
+    if quiet:
+        logging.getLogger().setLevel(logging.WARNING)
     from .pan.loader import ReportInputError
     from .pan.report import generate_report
 
@@ -743,14 +753,16 @@ def pan(
             report_dir=report_dir,
             family_ids=family,
             graphml=graphml,
+            top_n=top_families,
         )
     except ReportInputError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     typer.echo(f"报告已生成: {target}")
-    typer.echo(f"  run_summary.json: {os.path.join(target, 'run_summary.json')}")
-    typer.echo(f"  report.html: {os.path.join(target, 'report.html')}")
+    if not quiet:
+        typer.echo(f"  run_summary.json: {os.path.join(target, 'run_summary.json')}")
+        typer.echo(f"  report.html: {os.path.join(target, 'report.html')}")
 
 
 if __name__ == "__main__":

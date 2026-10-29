@@ -64,3 +64,17 @@ def test_pan_with_family_and_graphml(tmp_path):
     )
     assert result.exit_code == 0, result.stdout
     assert (out / "report" / "ssn_view.graphml").exists()
+
+
+def test_pan_top_families_and_quiet(tmp_path):
+    import json
+
+    out = tmp_path / "out"
+    _save_state(out)
+
+    result = runner.invoke(app, ["pan", "-o", str(out), "--top-families", "1", "--quiet"])
+
+    assert result.exit_code == 0, result.stdout
+    summary = json.loads((out / "report" / "run_summary.json").read_text(encoding="utf-8"))
+    assert len(summary["top_families"]) == 1
+    assert "run_summary.json:" not in result.stdout
