@@ -474,6 +474,13 @@ def run(
              "alignment cost), or full (adds all member-member edges within a cluster; "
              "cross-genome pairs require new alignments and can be slow for large clusters).",
     ),
+    family_mode: str = typer.Option(
+        "full_graph", "--family-mode",
+        help="Family clustering mode: full_graph (default, MCL on the full SSN) or collapsed "
+             "(members with identity >= cutoff-ii attached to a representative are folded away, "
+             "MCL runs on the representative graph only, then members are expanded back into "
+             "their anchor's family; much smaller MCL input on large redundant datasets).",
+    ),
     touch_evalue: Optional[float] = typer.Option(
         None, "--touch-evalue",
         help="E-value threshold for the 'touching' criterion used by --edge-completion-mode "
@@ -577,6 +584,12 @@ def run(
             "接触判据不会比搜索阶段更严格, 该选项将不起实际收紧效果。",
             fg=typer.colors.YELLOW, err=True,
         )
+    if family_mode not in ("full_graph", "collapsed"):
+        typer.secho(
+            f"--family-mode 取值非法: {family_mode}(可选: full_graph, collapsed)",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
     if edge_completion_mode not in VALID_EDGE_COMPLETION_MODES:
         typer.secho(
             f"--edge-completion-mode 取值非法: {edge_completion_mode}"
@@ -756,6 +769,7 @@ def run(
                 dump_raw_hits=dump_raw_hits,
                 touch_evalue=touch_evalue,
                 search_evalue=evalue,
+                family_mode=family_mode,
             ),
         )
 

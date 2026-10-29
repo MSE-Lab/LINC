@@ -29,7 +29,7 @@
        延续项目一贯的"结果排序以消除非确定性来源"原则)。
 """
 import logging
-from typing import Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 import networkx as nx
 
@@ -67,7 +67,21 @@ class FamilyRefineStage:
         self,
         complete_ssn: CompleteSSN,
         all_gene_ids: Optional[Iterable[str]] = None,
+        collapse_map: Optional[Dict[str, str]] = None,
     ) -> List[OrthologFamily]:
+        # family_mode=collapsed: collapse_map = {被折叠基因 -> 锚点代表}。
+        # 被折叠基因不进入图/MCL, 聚类后按锚点所在家族展开。
+        collapse_map = collapse_map or {}
+        if collapse_map:
+            if all_gene_ids is not None:
+                all_gene_ids = [g for g in all_gene_ids if g not in collapse_map]
+            complete_ssn = CompleteSSN(
+                edges={
+                    e for e in complete_ssn.edges
+                    if e.source not in collapse_map and e.target not in collapse_map
+                },
+                edge_completion_mode=complete_ssn.edge_completion_mode,
+            )
         graph = self._build_graph(complete_ssn, all_gene_ids)
 
         # 按最小节点排序连通分量, 保证遍历顺序跨运行确定(graph 的节点/边
@@ -142,14 +156,36 @@ class FamilyRefineStage:
         # 跨运行确定(mcl 输出簇的顺序/ dict 遍历顺序不保证跨运行一致)。
         family_specs.sort(key=lambda spec: (spec[0], sorted(spec[1])))
 
+        # 展开: 被折叠基因归入其锚点所在家族; 锚点不在任何家族时(不应发生)
+        # 各自作为独立家族兜底, 避免静默丢失。
+        expanded: Dict[str, set] = {}
+        if collapse_map:
+            anchor_to_family_idx = {}
+            for idx, (_, member_ids) in enumerate(family_specs):
+                for gene_id in member_ids:
+                    anchor_to_family_idx[gene_id] = idx
+            for gene_id, anchor in sorted(collapse_map.items()):
+                idx = anchor_to_family_idx.get(anchor)
+                if idx is None:
+                    logger.warning(
+                        "FamilyRefineStage: 折叠基因 %s 的锚点 %s 不在任何家族中, "
+                        "已作为独立家族补回", gene_id, anchor,
+                    )
+                    family_specs.append((0, {gene_id}))
+                    continue
+                expanded.setdefault(idx, set()).add(gene_id)
+
         families: List[OrthologFamily] = []
         for idx, (component_id, member_ids) in enumerate(family_specs):
+            # 边密度只基于代表图(展开前的成员)计算
+            density = self._edge_density(member_ids, graph)
+            all_members = set(member_ids) | expanded.get(idx, set())
             families.append(
                 OrthologFamily(
                     family_id=f"OG{idx:07d}",
                     component_id=component_id,
-                    member_genes=member_ids,
-                    edge_density=self._edge_density(member_ids, graph),
+                    member_genes=all_members,
+                    edge_density=density,
                 )
             )
 

@@ -33,6 +33,7 @@ from .core.entities import (
     IncrementalResult,
     OrthologFamily,
 )
+from .engine.collapse import compute_collapse_map
 from .engine.family_refine_stage import FamilyRefineStage
 from .engine.genome_load_stage import GenomeLoadStage, build_input_signature
 from .engine.global_join_stage import GlobalJoinStage
@@ -107,6 +108,10 @@ class PipelineConfig:
     # (性能旋钮)。语义参数, 影响结果, 纳入一致性校验(不加进
     # non_semantic_fields)。
     touch_evalue: Optional[float] = None
+    # 新增(折叠式家族聚类设计方案): full_graph=现有行为(全 SSN 上 MCL); collapsed=
+    # 高相似(>=cutoff_ii)成员折叠到代表上, 仅在代表图上 MCL 后再展开。
+    # 语义参数, 纳入一致性校验。
+    family_mode: str = "full_graph"
 
 
 @dataclass
@@ -194,6 +199,9 @@ class Pipeline:
         # (传给 mcl 的 `-te` 线程数), 不影响算法结果, 修改它不应被视为
         # "参数不一致"而触发 ConfigMismatchError/强制重算。
         non_semantic_fields = {"threads", "dump_raw_hits"}
+        # 旧版 config 不含 family_mode 时按默认值(full_graph)视为一致。
+        historical_config = dict(historical_config)
+        historical_config.setdefault("family_mode", "full_graph")
         mismatched = {
             key: (historical_config.get(key), current_config[key])
             for key in current_config
@@ -304,13 +312,29 @@ class Pipeline:
             cov_mode=config.cov_mode,
             cleanup_intermediate=not config.keep_intermediate,
             dump_raw_hits=config.dump_raw_hits,
+            collapsed_genes=set(self._collapse_map(intra_results, join_result)),
         )
         return ssn_stage.run(loaded_genomes, intra_results, join_result)
+
+    def _collapse_map(
+        self,
+        intra_results: Dict[str, GenomeIntraResult],
+        join_result: IncrementalResult,
+    ) -> Dict[str, str]:
+        config = self._config
+        if config.family_mode != "collapsed":
+            return {}
+        collapse_map = compute_collapse_map(
+            join_result, intra_results, config.cutoff_ii, config.cutoff_c
+        )
+        logger.info("family_mode=collapsed: 折叠 %d 个基因", len(collapse_map))
+        return collapse_map
 
     def _run_family(
         self,
         complete_ssn: CompleteSSN,
         intra_results: Dict[str, GenomeIntraResult],
+        join_result: IncrementalResult,
     ) -> List[OrthologFamily]:
         config = self._config
         family_stage = FamilyRefineStage(
@@ -330,7 +354,11 @@ class Pipeline:
             for cluster in intra.local_clusters
             for gene_id in cluster.member_ids
         }
-        return family_stage.run(complete_ssn, all_gene_ids=all_gene_ids)
+        return family_stage.run(
+            complete_ssn,
+            all_gene_ids=all_gene_ids,
+            collapse_map=self._collapse_map(intra_results, join_result),
+        )
 
     def run(self, genome_files: List[str]) -> PipelineResult:
         """首次完整运行(无历史状态), 依次跑完 5 个 Stage 并逐一持久化。"""
@@ -352,7 +380,7 @@ class Pipeline:
         complete_ssn = self._run_ssn(loaded_genomes, intra_results, join_result)
         self._repository.save_complete_ssn(complete_ssn)
 
-        families = self._run_family(complete_ssn, intra_results)
+        families = self._run_family(complete_ssn, intra_results, join_result)
         self._repository.save_families(families)
 
         # 工程审查问题1(2026-10-03 与用户确认; 2026-10-03 再次确认挪到末尾):
@@ -419,7 +447,7 @@ class Pipeline:
             complete_ssn = repo.load_complete_ssn()
 
         if forced_override or not repo.has_families():
-            families = self._run_family(complete_ssn, intra_results)
+            families = self._run_family(complete_ssn, intra_results, join_result)
             repo.save_families(families)
         else:
             families = repo.load_families()
@@ -503,7 +531,7 @@ class Pipeline:
             # `initial_touching_map` 接续。
 
         complete_ssn = self._run_ssn(merged_loaded, merged_intra_results, join_result)
-        families = self._run_family(complete_ssn, merged_intra_results)
+        families = self._run_family(complete_ssn, merged_intra_results, join_result)
 
         # 注意: `-i` 对应的 input_signature 不随 append 变化(`-i` 始终代表
         # 历史基础数据集, 只有 `-a` 每次追加的新目录才变化, 2026-10-02 与

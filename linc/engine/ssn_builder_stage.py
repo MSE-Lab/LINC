@@ -78,9 +78,13 @@ class SSNBuilderStage:
         cov_mode: int = COV_MODE_BIDIRECTIONAL,
         cleanup_intermediate: bool = True,
         dump_raw_hits: Optional[str] = None,
+        collapsed_genes: Optional[Set[str]] = None,
     ) -> None:
         self._aligner = aligner
         self._edge_completion_mode = edge_completion_mode
+        # family_mode=collapsed: 被折叠基因不进入 MCL 图, 补边阶段直接丢弃其
+        # 关联边, full 模式下也不为其发起跨基因组比对。
+        self._collapsed_genes: Set[str] = set(collapsed_genes or ())
         self._mega_cluster_warning_threshold = mega_cluster_warning_threshold
         self._event_bus = event_bus
         # 数据管理优化第3项(2026-10-03 与用户确认): full 模式下 search()
@@ -112,7 +116,7 @@ class SSNBuilderStage:
 
         if self._edge_completion_mode == EDGE_COMPLETION_NONE:
             logger.info("edge_completion_mode=none, 跳过补边, 仅保留稀疏SSN")
-            return CompleteSSN(edges=edges, edge_completion_mode=self._edge_completion_mode)
+            return self._finalize(edges)
 
         self._add_known_intra_genome_edges(
             intra_results, edges,
@@ -121,7 +125,7 @@ class SSNBuilderStage:
 
         if self._edge_completion_mode == EDGE_COMPLETION_REPRESENTATIVE_MEMBER:
             logger.info("SSNBuilderStage 完成(representative_member模式): 共 %d 条边", len(edges))
-            return CompleteSSN(edges=edges, edge_completion_mode=self._edge_completion_mode)
+            return self._finalize(edges)
 
         genes_by_id: Dict[str, Gene] = {
             gene.gene_id: gene for genome in genomes.values() for gene in genome.genes
@@ -131,6 +135,20 @@ class SSNBuilderStage:
         )
 
         logger.info("SSNBuilderStage 完成(full模式): 共 %d 条边", len(edges))
+        return self._finalize(edges)
+
+    def _finalize(self, edges: Set[SSNEdge]) -> CompleteSSN:
+        if self._collapsed_genes:
+            before = len(edges)
+            collapsed = self._collapsed_genes
+            edges = {
+                e for e in edges
+                if e.source not in collapsed and e.target not in collapsed
+            }
+            logger.info(
+                "collapsed 模式: 丢弃被折叠基因(%d 个)的关联边 %d 条, 剩余 %d 条",
+                len(collapsed), before - len(edges), len(edges),
+            )
         return CompleteSSN(edges=edges, edge_completion_mode=self._edge_completion_mode)
 
     def _add_known_intra_genome_edges(
@@ -290,6 +308,8 @@ class SSNBuilderStage:
                 continue
             members_by_genome: Dict[str, List[str]] = {}
             for gene_id in cluster.member_ids:
+                if gene_id in self._collapsed_genes:
+                    continue
                 gene_cluster_map[gene_id] = cluster.cluster_id
                 gene = genes_by_id.get(gene_id)
                 if gene is None:
