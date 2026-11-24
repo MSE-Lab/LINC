@@ -1,11 +1,23 @@
 [project]
 name = "linc"
 version = "0.1.0"
+description = "Incremental comparative genomics framework for protein family clustering and pan-genome analysis"
+readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "LINC Development Team" }
+]
+keywords = ["comparative-genomics", "pan-genome", "orthology", "clustering", "mcl", "ssn"]
 dependencies = [
-    "numpy",
-    "networkx",
-    "typer",
+    "numpy>=1.24",
+    "networkx>=3.0",
+    "typer>=0.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
 ]
 
 [project.scripts]

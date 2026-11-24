@@ -1,0 +1,17 @@
+name: linc
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python>=3.11
+  - numpy>=1.24
+  - networkx>=3.0
+  - typer>=0.9.0
+  - pytest>=7.0
+  - mmseqs2
+  - diamond
+  - mcl
+  - pip
+  - pip:
+      - -e .
