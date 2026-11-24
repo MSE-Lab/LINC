@@ -65,7 +65,7 @@ LINC requires Python >= 3.11 and external bioconda binaries (`mmseqs2`, `diamond
 
 ```bash
 # 1. Clone repository
-git clone https://github.com/your-username/LINC.git
+git clone https://github.com/MSE-Lab/LINC.git
 cd LINC
 
 # 2. Create conda environment (contains mmseqs2, diamond, mcl, python dependencies)
