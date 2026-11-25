@@ -84,6 +84,8 @@ class PipelineConfig:
     inflation: float = 1.5
     edge_weight_mode: str = "identity_x_coverage"
     edge_weight_alpha: float = 0.5
+    # 2026-11-25 与用户确认: 基因数 < 该值的连通分量不做 MCL 细分, 直接输出
+    mcl_min_component_size: int = 5
     # 数据管理优化第3项(2026-10-03 与用户确认): 默认 False 即各 Stage 用完
     # search()/mcl 产生的中间文件即删, 避免 `.linc_work` 无限累积; 设为
     # True 保留全部中间产物以便调试(索引目录/state pkl 不受影响, 始终保留)。
@@ -204,6 +206,10 @@ class Pipeline:
         historical_config.setdefault("family_mode", "full_graph")
         historical_config.setdefault("search_evalue", 1e-5)
         historical_config.setdefault("touch_evalue", None)
+        # 旧版 config 不含 mcl_min_component_size: 旧行为只跳过 size=1 的孤立节点,
+        # 等价于阈值 2(2026-11-25), 因此按 2 视为历史值, 与新默认值 5 比较时
+        # 会如实报告不一致(避免新旧阈值产出的结果被悄悄混用)。
+        historical_config.setdefault("mcl_min_component_size", 2)
         mismatched = {
             key: (historical_config.get(key), current_config[key])
             for key in current_config
@@ -352,6 +358,7 @@ class Pipeline:
             edge_weight_alpha=config.edge_weight_alpha,
             cleanup_intermediate=not config.keep_intermediate,
             threads=config.threads,
+            mcl_min_component_size=config.mcl_min_component_size,
         )
         # 传入全部基因id, 以便零边的孤立基因也能被显式补成图节点, 避免在
         # nx.connected_components() 中被静默忽略而从最终家族结果中消失

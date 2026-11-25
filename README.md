@@ -157,6 +157,7 @@ linc pan -g output/Orthogroups.txt -m output/gene_genome.tsv -o output/pan_genom
 | `--max-per-cluster` | `5` | Maximum number of representatives allowed per local cluster |
 | `--edge-completion-mode` | `representative_member` | SSN edge mode: `none`, `representative_member`, or `full` |
 | `--inflation` | `1.5` | MCL inflation parameter (-I) for family refinement |
+| `--mcl-min-component-size` | `5` | Connected components with fewer genes than this value skip MCL and are output directly as one family (`size < N` skipped, `size >= N` refined by MCL); must be >= 1, `2` reproduces the previous behaviour (only singletons skipped) |
 | `--edge-weight-mode` | `identity_x_coverage` | SSN edge weight mode: `identity`, `coverage`, `identity_x_coverage`, `bitscore` |
 
 ### `linc pan` Parameters

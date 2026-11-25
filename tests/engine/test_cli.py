@@ -531,6 +531,60 @@ def test_run_invalid_inflation_exits_with_error(tmp_path):
     assert not output_dir.exists()
 
 
+def test_run_family_summary_records_default_mcl_min_component_size(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(app, ["run", "-i", str(input_dir), "-o", str(output_dir)])
+
+    assert result.exit_code == 0
+    family_summary = json.loads(
+        (output_dir / "family_summary.json").read_text(encoding="utf-8")
+    )
+    assert family_summary["mcl_min_component_size"] == 5
+
+
+def test_run_custom_mcl_min_component_size_is_recorded(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(
+        app,
+        [
+            "run", "-i", str(input_dir), "-o", str(output_dir),
+            "--mcl-min-component-size", "2",
+        ],
+    )
+
+    assert result.exit_code == 0
+    family_summary = json.loads(
+        (output_dir / "family_summary.json").read_text(encoding="utf-8")
+    )
+    assert family_summary["mcl_min_component_size"] == 2
+
+
+def test_run_invalid_mcl_min_component_size_exits_with_error(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(
+        app,
+        [
+            "run", "-i", str(input_dir), "-o", str(output_dir),
+            "--mcl-min-component-size", "0",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert not output_dir.exists()
+
+
 def test_run_invalid_edge_weight_mode_exits_with_error(tmp_path):
     input_dir = tmp_path / "genomes"
     input_dir.mkdir()

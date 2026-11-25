@@ -9,9 +9,12 @@
        延续"存储原始值、按需计算权重"的既有设计), 按连通分量拆分
        (一个连通分量 = 一个"超家族", 对应 `OrthologFamily.component_id`)。
     3. 对每个连通分量分别调用外部 `mcl` 命令做细分(而不是整图一次性调用):
-       - 连通分量只有 1 个基因(孤立节点, 无边): 直接作为一个 size=1 的
-         独立家族, 不调用 mcl(mcl 对无边输入没有意义, 与用户确认)。
-       - 其余连通分量: 调用 `ClusteringPort.cluster(subgraph, inflation=...)`
+       - 连通分量基因数 < `mcl_min_component_size`(默认 5, 2026-11-25 与用户
+         确认, CLI `--mcl-min-component-size`): 不调用 mcl, 整个分量直接作为
+         一个家族输出(含 size=1 的孤立节点: 无边输入对 mcl 没有意义,
+         与用户确认)。
+       - 其余连通分量(size >= `mcl_min_component_size`): 调用
+         `ClusteringPort.cluster(subgraph, inflation=...)`
          (生产环境传入 `MCLClustering`), 得到的每个子簇生成一个
          `OrthologFamily`。
        - 注意(2026-10-02 修复): 图的节点不能只靠 `CompleteSSN.edges` 隐式
@@ -50,6 +53,7 @@ class FamilyRefineStage:
         edge_weight_alpha: float = 0.5,
         cleanup_intermediate: bool = True,
         threads: int = 0,
+        mcl_min_component_size: int = 5,
     ) -> None:
         self._clustering = clustering
         self._inflation = inflation
@@ -62,6 +66,9 @@ class FamilyRefineStage:
         # 优化, 通过 mcl 原生 `-te` 参数利用多核(0 表示不显式指定, 与
         # CLI `--threads 0` 既有语义对齐)。
         self._threads = threads
+        # 2026-11-25 与用户确认: 基因数 < 该值的连通分量不做 MCL 细分,
+        # 整体直接输出为一个家族; size >= 该值才调用 MCL。
+        self._mcl_min_component_size = mcl_min_component_size
 
     def run(
         self,
@@ -101,11 +108,14 @@ class FamilyRefineStage:
         family_specs = []  # List[Tuple[component_id, member_ids: set]]
         gene_to_component_id = {}
         non_trivial_nodes = set()
+        n_skipped_components = 0
         for component_id, component_nodes in enumerate(components, start=1):
-            if len(component_nodes) == 1:
-                # 孤立节点(无边的连通分量): 不调用 mcl, 直接作为独立家族
-                # (与用户确认, 2026-10-02)。
+            if len(component_nodes) < self._mcl_min_component_size:
+                # 小连通分量(含无边的孤立节点): 不调用 mcl, 整个分量直接
+                # 作为一个家族(孤立节点与用户确认于 2026-10-02, 阈值参数化
+                # 与用户确认于 2026-11-25)。
                 family_specs.append((component_id, set(component_nodes)))
+                n_skipped_components += 1
                 continue
             for gene_id in component_nodes:
                 gene_to_component_id[gene_id] = component_id
@@ -191,8 +201,10 @@ class FamilyRefineStage:
 
         logger.info(
             "FamilyRefineStage 完成: inflation=%.2f, edge_weight_mode=%s, "
-            "共 %d 个连通分量, %d 个直系同源家族",
-            self._inflation, self._edge_weight_mode, len(components), len(families),
+            "共 %d 个连通分量(其中 %d 个因 size < %d 跳过 MCL 直接输出), "
+            "%d 个直系同源家族",
+            self._inflation, self._edge_weight_mode, len(components),
+            n_skipped_components, self._mcl_min_component_size, len(families),
         )
         return families
 

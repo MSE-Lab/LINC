@@ -151,9 +151,15 @@ def _build_ssn_summary(complete_ssn) -> dict:
     }
 
 
-def _build_family_summary(families, inflation: float, edge_weight_mode: str) -> dict:
+def _build_family_summary(
+    families,
+    inflation: float,
+    edge_weight_mode: str,
+    mcl_min_component_size: int = 5,
+) -> dict:
     return {
         "inflation": inflation,
+        "mcl_min_component_size": mcl_min_component_size,
         "edge_weight_mode": edge_weight_mode,
         "n_families": len(families),
         "families": [
@@ -331,6 +337,13 @@ def run(
         help="MCL inflation parameter controlling sub-family granularity: lower values yield "
              "coarser clusters, higher values yield finer ones. Requires mcl to be installed.",
     ),
+    mcl_min_component_size: int = typer.Option(
+        5, "--mcl-min-component-size",
+        help="Connected components with fewer genes than this value skip MCL refinement and "
+             "are output directly as a single family; only components with size >= this "
+             "value are refined by MCL. Must be >= 1 (1 skips nothing but singletons are "
+             "never sent to MCL anyway; 2 reproduces the old behaviour).",
+    ),
     edge_weight_mode: str = typer.Option(
         "identity_x_coverage", "--edge-weight-mode",
         help="Edge weight used by MCL: identity | coverage | "
@@ -437,6 +450,12 @@ def run(
     if inflation <= 0:
         typer.secho(
             f"--inflation 必须 > 0, 当前为: {inflation}",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+    if mcl_min_component_size < 1:
+        typer.secho(
+            f"--mcl-min-component-size 必须 >= 1, 当前为: {mcl_min_component_size}",
             fg=typer.colors.RED, err=True,
         )
         raise typer.Exit(code=1)
@@ -593,6 +612,7 @@ def run(
                 edge_completion_mode=edge_completion_mode,
                 mega_cluster_warning_threshold=mega_cluster_warning_threshold,
                 inflation=inflation,
+                mcl_min_component_size=mcl_min_component_size,
                 edge_weight_mode=edge_weight_mode,
                 edge_weight_alpha=edge_weight_alpha,
                 keep_intermediate=keep_intermediate,
@@ -688,7 +708,9 @@ def run(
         )
         typer.echo(f"摘要已写入: {ssn_summary_path}")
 
-        family_summary = _build_family_summary(result.families, inflation, edge_weight_mode)
+        family_summary = _build_family_summary(
+            result.families, inflation, edge_weight_mode, mcl_min_component_size,
+        )
         family_summary_path = os.path.join(output_dir, "family_summary.json")
         with open(family_summary_path, "w", encoding="utf-8") as fh:
             json.dump(family_summary, fh, ensure_ascii=False, indent=2)

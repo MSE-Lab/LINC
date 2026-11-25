@@ -135,7 +135,10 @@ def test_connected_component_can_be_split_into_multiple_families_by_mcl():
     # A-B-C 链, 假聚类器把每条边拆成独立簇 -> 应产出2个家族, 但同属一个
     # component_id(因为它们在同一个 SSN 连通分量内)。
     complete_ssn = CompleteSSN(edges={_edge("A", "B"), _edge("B", "C")})
-    stage = FamilyRefineStage(clustering=_SplitEveryEdgeIntoOwnCluster())
+    # mcl_min_component_size=2: 默认阈值5会让3个基因的分量跳过MCL, 这里要验证MCL拆分。
+    stage = FamilyRefineStage(
+        clustering=_SplitEveryEdgeIntoOwnCluster(), mcl_min_component_size=2,
+    )
 
     families = stage.run(complete_ssn)
 
@@ -161,7 +164,10 @@ def test_edge_weight_mode_is_passed_through_to_graph_weight():
             pass
 
     complete_ssn = CompleteSSN(edges={_edge("A", "B", identity=0.5, coverage=0.5, bitscore=999.0)})
-    stage = FamilyRefineStage(clustering=_CaptureWeights(), edge_weight_mode="bitscore")
+    stage = FamilyRefineStage(
+        clustering=_CaptureWeights(), edge_weight_mode="bitscore",
+        mcl_min_component_size=2,
+    )
 
     stage.run(complete_ssn)
 
@@ -253,7 +259,9 @@ def test_incomplete_mcl_partition_missing_genes_are_backfilled_as_singletons(cap
     日志便于事后排查。
     """
     complete_ssn = CompleteSSN(edges={_edge("A", "B"), _edge("B", "C")})
-    stage = FamilyRefineStage(clustering=_IncompletePartitionClustering())
+    stage = FamilyRefineStage(
+        clustering=_IncompletePartitionClustering(), mcl_min_component_size=2,
+    )
 
     with caplog.at_level("WARNING"):
         families = stage.run(complete_ssn)
@@ -292,7 +300,7 @@ def test_multiple_components_trigger_only_one_cluster_call():
         _edge("A", "B"), _edge("C", "D"), _edge("E", "F"),
     })
     fake = _CountingClustering()
-    stage = FamilyRefineStage(clustering=fake)
+    stage = FamilyRefineStage(clustering=fake, mcl_min_component_size=2)
 
     families = stage.run(complete_ssn)
 
@@ -312,7 +320,7 @@ def test_threads_param_is_passed_through_to_cluster_call():
     MCLClustering 转换为 mcl 的 `-te` 参数。"""
     complete_ssn = CompleteSSN(edges={_edge("A", "B")})
     fake = _CountingClustering()
-    stage = FamilyRefineStage(clustering=fake, threads=8)
+    stage = FamilyRefineStage(clustering=fake, threads=8, mcl_min_component_size=2)
 
     stage.run(complete_ssn)
 
@@ -344,7 +352,9 @@ def test_incomplete_mcl_partition_all_missing_backfills_every_node(caplog):
             return None
 
     complete_ssn = CompleteSSN(edges={_edge("A", "B")})
-    stage = FamilyRefineStage(clustering=_EmptyPartitionClustering())
+    stage = FamilyRefineStage(
+        clustering=_EmptyPartitionClustering(), mcl_min_component_size=2,
+    )
 
     with caplog.at_level("WARNING"):
         families = stage.run(complete_ssn)
@@ -352,3 +362,92 @@ def test_incomplete_mcl_partition_all_missing_backfills_every_node(caplog):
     assert len(families) == 2
     member_sets = {frozenset(f.member_genes) for f in families}
     assert member_sets == {frozenset({"A"}), frozenset({"B"})}
+
+
+def _chain_edges(prefix: str, n: int):
+    """构造一个恰好含 n 个基因的链状连通分量的边集合。"""
+    names = [f"{prefix}{i}" for i in range(n)]
+    return {_edge(names[i], names[i + 1]) for i in range(n - 1)}
+
+
+def test_component_smaller_than_min_size_skips_mcl_and_is_output_whole():
+    """size=4 < 5: 不调用 cluster(), 整个分量直接作为一个家族输出
+    (即使假聚类器会把每条边拆开, 也不应被拆)。"""
+    complete_ssn = CompleteSSN(edges=_chain_edges("A", 4))
+    fake = _CountingClustering()
+    stage = FamilyRefineStage(clustering=fake, mcl_min_component_size=5)
+
+    families = stage.run(complete_ssn)
+
+    assert fake.call_count == 0
+    assert len(families) == 1
+    assert families[0].member_genes == {"A0", "A1", "A2", "A3"}
+
+
+def test_component_equal_to_min_size_goes_through_mcl():
+    """size=5 >= 5: 应调用 cluster() 做 MCL 细分(阈值语义为 size < 5 跳过)。"""
+    complete_ssn = CompleteSSN(edges=_chain_edges("A", 5))
+    stage = FamilyRefineStage(
+        clustering=_SplitEveryEdgeIntoOwnCluster(), mcl_min_component_size=5,
+    )
+
+    families = stage.run(complete_ssn)
+
+    # 5个节点的链有 4 条边, 假聚类器把每条边拆成独立簇 -> 4 个家族。
+    assert len(families) == 4
+    assert {f.component_id for f in families} == {1}
+
+
+def test_small_and_large_components_are_handled_separately():
+    """同一张图里: size=3 的小分量直接输出, size=6 的大分量走 MCL; 且
+    cluster() 只被调用 1 次, 且只收到大分量的节点。"""
+    received_nodes = []
+
+    class _Capture:
+        def cluster(self, graph: nx.Graph, **params) -> List[Set[str]]:
+            received_nodes.append(set(graph.nodes))
+            return [set(c) for c in nx.connected_components(graph)]
+
+        def cleanup(self, index_id=None) -> None:
+            return None
+
+    complete_ssn = CompleteSSN(edges=_chain_edges("A", 3) | _chain_edges("B", 6))
+    stage = FamilyRefineStage(clustering=_Capture(), mcl_min_component_size=5)
+
+    families = stage.run(complete_ssn)
+
+    assert received_nodes == [{f"B{i}" for i in range(6)}]
+    assert len(families) == 2
+    member_sets = {frozenset(f.member_genes) for f in families}
+    assert member_sets == {
+        frozenset({"A0", "A1", "A2"}),
+        frozenset({f"B{i}" for i in range(6)}),
+    }
+
+
+def test_min_component_size_one_sends_everything_except_nothing_skipped():
+    """阈值=1 时 `size < 1` 永远不成立, 所有分量(包括孤立节点)都会
+    进入 cluster() 调用的输入图。"""
+    complete_ssn = CompleteSSN(edges=set())
+    fake = _CountingClustering()
+    stage = FamilyRefineStage(clustering=fake, mcl_min_component_size=1)
+
+    families = stage.run(complete_ssn, all_gene_ids={"X", "Y"})
+
+    assert fake.call_count == 1
+    assert len(families) == 2
+
+
+def test_default_min_component_size_is_five():
+    """默认阈值为 5(与用户确认, 2026-11-25): size=4 跳过, size=5 不跳过。"""
+    fake_small = _CountingClustering()
+    FamilyRefineStage(clustering=fake_small).run(
+        CompleteSSN(edges=_chain_edges("A", 4))
+    )
+    assert fake_small.call_count == 0
+
+    fake_big = _CountingClustering()
+    FamilyRefineStage(clustering=fake_big).run(
+        CompleteSSN(edges=_chain_edges("A", 5))
+    )
+    assert fake_big.call_count == 1

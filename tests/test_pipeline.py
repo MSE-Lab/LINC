@@ -367,6 +367,41 @@ def test_resume_treats_missing_evalue_fields_in_old_config_as_defaults(tmp_path)
     _make_pipeline(repo).resume([str(file_path)])
 
 
+def test_resume_old_config_without_mcl_min_component_size_is_treated_as_two(tmp_path):
+    """旧 config 缺 mcl_min_component_size(旧行为等价于阈值2): 本次若用新默认值5
+    应报不一致; 若显式使用 2 则视为一致。"""
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    file_path = input_dir / "g1.faa"
+    _write_fasta(str(file_path), [("x", "MKV")])
+
+    repo = FileRepository(str(tmp_path / "state"))
+    _make_pipeline(repo).run([str(file_path)])
+    config = repo.load_config()
+    config.pop("mcl_min_component_size", None)
+    repo.save_config(config)
+
+    default_pipeline = Pipeline(
+        aligner=MockAligner(),
+        clustering_for_intra=UnionFindClustering(),
+        clustering_for_mcl=UnionFindClustering(),
+        repository=repo,
+        config=PipelineConfig(),
+    )
+    with pytest.raises(ConfigMismatchError) as exc_info:
+        default_pipeline.resume([str(file_path)])
+    assert "mcl_min_component_size" in str(exc_info.value)
+
+    compatible_pipeline = Pipeline(
+        aligner=MockAligner(),
+        clustering_for_intra=UnionFindClustering(),
+        clustering_for_mcl=UnionFindClustering(),
+        repository=repo,
+        config=PipelineConfig(mcl_min_component_size=2),
+    )
+    compatible_pipeline.resume([str(file_path)])
+
+
 def test_resume_still_detects_non_default_search_evalue_with_old_config(tmp_path):
     """旧 config 缺字段按默认值补齐后, 本次若 search_evalue 非默认值仍应报不一致。"""
     input_dir = tmp_path / "genomes"
