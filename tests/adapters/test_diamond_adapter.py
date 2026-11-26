@@ -207,6 +207,63 @@ def test_default_threads_zero_omits_threads_flag(monkeypatch):
     assert "--threads" not in cmd
 
 
+def _capture_blastp_cmd(monkeypatch, config=None):
+    """运行一次 align_all_vs_all 并返回传给 diamond blastp 的命令行。"""
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/diamond")
+    captured_cmd = {}
+
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
+        if cmd[1] == "blastp":
+            captured_cmd["cmd"] = cmd
+            result_tsv = cmd[cmd.index("-o") + 1]
+            with open(result_tsv, "w", encoding="utf-8") as fh:
+                fh.write("")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    aligner = DiamondAligner(config) if config else DiamondAligner()
+    aligner.align_all_vs_all([_gene("g1|1", 100), _gene("g1|2", 100)])
+    return captured_cmd["cmd"]
+
+
+def test_default_max_target_seqs_is_passed_to_blastp(monkeypatch):
+    """diamond 默认只保留 25 条命中, 必须显式传 --max-target-seqs(默认 100000,
+    与 mmseqs 的 max_seqs 对齐, 2026-11-26 与用户确认)。"""
+    cmd = _capture_blastp_cmd(monkeypatch)
+
+    assert "--max-target-seqs" in cmd
+    assert cmd[cmd.index("--max-target-seqs") + 1] == "100000"
+
+
+def test_custom_max_target_seqs_is_passed_to_blastp(monkeypatch):
+    cmd = _capture_blastp_cmd(monkeypatch, DiamondConfig(max_target_seqs=500))
+
+    assert cmd[cmd.index("--max-target-seqs") + 1] == "500"
+
+
+def test_search_with_persistent_index_passes_max_target_seqs(monkeypatch, tmp_path):
+    """基于持久化索引的 search() 路径同样应带上 --max-target-seqs。"""
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/diamond")
+    captured = {}
+
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
+        if cmd[1] == "blastp":
+            captured["cmd"] = cmd
+            result_tsv = cmd[cmd.index("-o") + 1]
+            with open(result_tsv, "w", encoding="utf-8") as fh:
+                fh.write("")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    aligner = DiamondAligner(DiamondConfig(work_dir=_tmp_work_dir(tmp_path)))
+    index = aligner.build_index([_gene("g1|1", 100)], index_id="genome_x")
+    aligner.search([_gene("g1|2", 100)], index)
+
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--max-target-seqs") + 1] == "100000"
+
+
 def test_build_index_runs_makedb_and_returns_persistent_db_path(monkeypatch, tmp_path):
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/diamond")
     captured = {}

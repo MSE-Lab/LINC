@@ -10,6 +10,10 @@
   (少了 query 侧建库这一步)。
 - `makedb`(建库) 只需对 target/subject 执行一次, 产出 `<name>.dmnd` 文件,
   这正是 `build_index` 要持久化复用的对象。
+- diamond 默认每条 query 只保留 25 个目标序列(`--max-target-seqs` 默认值),
+  大家族里会静默截断命中、与"必须全量比对"的设计目标冲突; 因此 `search` 命令
+  显式传入 `--max-target-seqs`, 默认 100000, 与 mmseqs 的
+  `MMseqsConfig.max_seqs` 口径对齐(2026-11-26 与用户确认, 不提供 CLI 选项)。
 """
 import logging
 import os
@@ -47,6 +51,10 @@ class DiamondConfig:
     # 进程永久挂起(工程审查问题8, 2026-10-03 与用户确认)。设为一个较大的
     # 默认值(秒), None 表示不限时, 供极端大数据场景按需调大/关闭。
     timeout_seconds: Optional[int] = 3600
+    # diamond 默认 --max-target-seqs=25, 会静默截断每条 query 的命中; 默认设为
+    # 100000 与 MMseqsConfig.max_seqs 对齐(2026-11-26 与用户确认)。仅通过
+    # Python API 调整, 不提供 CLI 选项。
+    max_target_seqs: int = 100000
 
 
 class DiamondAligner:
@@ -123,6 +131,7 @@ class DiamondAligner:
             "-o", result_tsv,
             "--outfmt", "6", *_OUTFMT_COLUMNS.split(),
             "-e", str(self._config.evalue),
+            "--max-target-seqs", str(self._config.max_target_seqs),
             self._sensitivity_flag(),
             "--quiet",
         ]
