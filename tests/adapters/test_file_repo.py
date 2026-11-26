@@ -297,3 +297,122 @@ def test_config_roundtrip_across_instances(tmp_path):
 
     repo2 = FileRepository(state_dir)
     assert repo2.load_config() == {"cutoff_i": 0.5, "inflation": 1.5}
+
+
+# ---- 多文件原子批量提交(2026-11-26, 代码深度检查问题3, 与用户确认) ----
+
+def _fail_replace_when_dst_endswith(monkeypatch, suffix: str):
+    """让 os.replace 在目标路径以 suffix 结尾时抛 OSError(模拟此处崩溃)。"""
+    import os
+
+    real_replace = os.replace
+
+    def fake_replace(src, dst, *args, **kwargs):
+        if str(dst).endswith(suffix):
+            raise OSError(f"simulated crash while replacing {dst}")
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", fake_replace)
+
+
+def _seed_old_state(repo: FileRepository) -> None:
+    repo.save_genomes({"old": Genome(genome_id="old", file_path="old.faa")})
+    repo.save_join_result(IncrementalResult(cluster_counter=1))
+    repo.save_config({"v": "old"})
+
+
+def _new_batch() -> dict:
+    return {
+        "genomes": {"new": Genome(genome_id="new", file_path="new.faa")},
+        "join_result": IncrementalResult(cluster_counter=9),
+        "config": {"v": "new"},
+    }
+
+
+def test_commit_state_batch_applies_all_entries_and_leaves_no_residue(tmp_path):
+    state_dir = tmp_path / "state"
+    repo = FileRepository(str(state_dir))
+    _seed_old_state(repo)
+
+    repo.commit_state_batch(_new_batch())
+
+    assert set(repo.load_genomes()) == {"new"}
+    assert repo.load_join_result().cluster_counter == 9
+    assert repo.load_config() == {"v": "new"}
+    assert not (state_dir / "commit_pending.json").exists()
+    assert list(state_dir.glob("*.new")) == []
+
+
+def test_commit_state_batch_rejects_unknown_key(tmp_path):
+    repo = FileRepository(str(tmp_path / "state"))
+    with pytest.raises(KeyError):
+        repo.commit_state_batch({"not_a_state_key": 1})
+
+
+def test_crash_before_commit_point_keeps_old_state_and_cleans_new_files(tmp_path, monkeypatch):
+    state_dir = tmp_path / "state"
+    repo = FileRepository(str(state_dir))
+    _seed_old_state(repo)
+
+    # 崩溃发生在写提交标记时: 此时所有 .new 已写好, 但提交点尚未达成。
+    _fail_replace_when_dst_endswith(monkeypatch, "commit_pending.json")
+    with pytest.raises(OSError):
+        repo.commit_state_batch(_new_batch())
+    monkeypatch.undo()
+
+    # 旧状态原样可读, 没有任何一个文件被替换。
+    fresh = FileRepository(str(state_dir))
+    assert set(fresh.load_genomes()) == {"old"}
+    assert fresh.load_join_result().cluster_counter == 1
+    assert fresh.load_config() == {"v": "old"}
+
+    assert fresh.recover_pending_commit() is True
+    assert list(state_dir.glob("*.new")) == []
+    assert not (state_dir / "commit_pending.json.tmp").exists()
+    assert set(fresh.load_genomes()) == {"old"}
+    assert fresh.recover_pending_commit() is False
+
+
+def test_crash_after_commit_point_is_rolled_forward_on_recover(tmp_path, monkeypatch):
+    state_dir = tmp_path / "state"
+    repo = FileRepository(str(state_dir))
+    _seed_old_state(repo)
+
+    # 崩溃发生在阶段二: genomes 已改名生效, join_result 改名时崩溃。
+    _fail_replace_when_dst_endswith(monkeypatch, "join_result.pkl")
+    with pytest.raises(OSError):
+        repo.commit_state_batch(_new_batch())
+    monkeypatch.undo()
+
+    assert (state_dir / "commit_pending.json").exists()
+    # 恢复前确实是新旧混杂状态(这正是要消除的风险)。
+    mixed = FileRepository(str(state_dir))
+    assert set(mixed.load_genomes()) == {"new"}
+    assert mixed.load_join_result().cluster_counter == 1
+
+    recovering = FileRepository(str(state_dir))
+    assert recovering.recover_pending_commit() is True
+
+    assert set(recovering.load_genomes()) == {"new"}
+    assert recovering.load_join_result().cluster_counter == 9
+    assert recovering.load_config() == {"v": "new"}
+    assert not (state_dir / "commit_pending.json").exists()
+    assert list(state_dir.glob("*.new")) == []
+
+
+def test_recover_pending_commit_is_idempotent_and_noop_on_clean_state(tmp_path):
+    repo = FileRepository(str(tmp_path / "state"))
+    assert repo.recover_pending_commit() is False
+    _seed_old_state(repo)
+    assert repo.recover_pending_commit() is False
+    assert repo.recover_pending_commit() is False
+    assert set(repo.load_genomes()) == {"old"}
+
+
+def test_corrupted_commit_marker_raises_state_corrupted_error(tmp_path):
+    state_dir = tmp_path / "state"
+    repo = FileRepository(str(state_dir))
+    (state_dir / "commit_pending.json").write_text("not json {{{", encoding="utf-8")
+
+    with pytest.raises(StateCorruptedError):
+        repo.recover_pending_commit()

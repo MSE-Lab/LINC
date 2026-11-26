@@ -99,3 +99,24 @@ class MemoryRepository:
 
     def load_config(self) -> Optional[Dict[str, Any]]:
         return copy.deepcopy(self._config) if self._config is not None else None
+
+    def commit_state_batch(self, entries: Dict[str, Any]) -> None:
+        """内存实现无崩溃场景, 直接逐个保存(先校验键, 避免部分生效)。"""
+        savers = {
+            "genomes": self.save_genomes,
+            "intra_results": self.save_intra_results,
+            "join_result": self.save_join_result,
+            "complete_ssn": self.save_complete_ssn,
+            "families": self.save_families,
+            "input_signature": self.save_input_signature,
+            "config": self.save_config,
+        }
+        unknown = [key for key in entries if key not in savers]
+        if unknown:
+            raise KeyError(f"未知的状态键: {unknown}")
+        for key, obj in entries.items():
+            savers[key](obj)
+
+    def recover_pending_commit(self) -> bool:
+        """内存实现不存在遗留的未完成提交。"""
+        return False

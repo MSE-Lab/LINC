@@ -15,6 +15,19 @@
 数据压缩比通常可达 3-4 倍), 不改变任何读取逻辑或数据结构本身。读取时优先
 按 gzip 解压, 若文件是本次改动之前写入的旧版非压缩 pickle 文件, 自动回退为
 直接 pickle 读取, 保持向后兼容(不强制用户手动迁移已有的 `.linc_work/state/`)。
+
+多文件原子批量提交(2026-11-26, 代码深度检查问题3, 与用户确认): `--append`
+需要一次性更新 genomes/intra_results/join_result/complete_ssn/families/config
+多个状态文件, 单个文件的写入虽然原子, 但文件之间没有整体原子性, 中途崩溃会
+留下"新旧混杂"的 state(例如 genomes 已含新基因组, intra/join 仍是旧的, 之后
+--resume 会静默漏掉新基因组)。`commit_state_batch()` 采用两阶段提交:
+  1. 阶段一: 每个对象写成 `<name>.pkl.new`, 旧状态完全未动;
+  2. 提交点: 原子写入标记文件 `commit_pending.json`(列出本批涉及的键);
+  3. 阶段二: 逐个 `os.replace(<name>.pkl.new, <name>.pkl)`, 全部完成后删除标记。
+`recover_pending_commit()` 在 resume/append/CLI 启动时调用: 标记存在 -> 说明
+所有 .new 都已写完, 把剩余的 .new 改名前滚并删除标记(可重复执行/幂等); 标记
+不存在但有零散 .new -> 崩溃发生在提交点之前, 旧状态完整, 直接删除这些 .new。
+最终要么整批生效, 要么整批不生效。
 """
 import gzip
 import json
@@ -86,6 +99,9 @@ class FileRepository:
         self._run_id_path = os.path.join(self._state_dir, "run_id.pkl")
         self._run_id: Optional[str] = None
 
+    _COMMIT_MARKER = "commit_pending.json"
+    _NEW_SUFFIX = ".new"
+
     def _path(self, key: str) -> str:
         return os.path.join(self._state_dir, self._FILES[key])
 
@@ -113,14 +129,92 @@ class FileRepository:
         # {"__schema_version__": N, "payload": obj}, 供 `_load()` 校验。
         path = self._path(key)
         tmp_path = path + ".tmp"
+        self._write_wrapped(tmp_path, obj)
+        os.replace(tmp_path, path)
+
+    def _write_wrapped(self, target_path: str, obj) -> None:
+        """把 obj 包上 schema/run_id 标记后 gzip+pickle 写到 target_path。"""
         wrapped = {
             "__schema_version__": self.SCHEMA_VERSION,
             "__run_id__": self._get_or_create_run_id(),
             "payload": obj,
         }
-        with gzip.open(tmp_path, "wb") as fh:
+        with gzip.open(target_path, "wb") as fh:
             pickle.dump(wrapped, fh)
-        os.replace(tmp_path, path)
+
+    # ---- 多文件原子批量提交(2026-11-26, 代码深度检查问题3) ----
+    def commit_state_batch(self, entries: Dict[str, Any]) -> None:
+        """把多个状态对象作为一个整体原子提交(两阶段, 见模块 docstring)。
+
+        `entries`: 状态键(genomes/intra_results/join_result/complete_ssn/
+        families/input_signature/config)-> 待保存对象。键按字典顺序处理。
+        """
+        unknown = [key for key in entries if key not in self._FILES]
+        if unknown:
+            raise KeyError(f"未知的状态键: {unknown}")
+        if not entries:
+            return
+        # 先处理上一次遗留的未完成提交, 避免与本批的 .new 文件混淆。
+        self.recover_pending_commit()
+
+        keys = list(entries)
+        # 阶段一: 全部写成 .new, 旧状态完全未动。
+        for key in keys:
+            self._write_wrapped(self._path(key) + self._NEW_SUFFIX, entries[key])
+
+        # 提交点: 原子写入标记文件。
+        marker_path = os.path.join(self._state_dir, self._COMMIT_MARKER)
+        marker_tmp = marker_path + ".tmp"
+        with open(marker_tmp, "w", encoding="utf-8") as fh:
+            json.dump({"keys": keys}, fh)
+        os.replace(marker_tmp, marker_path)
+
+        # 阶段二: 逐个改名生效, 全部完成后删除标记。
+        self._roll_forward(keys)
+        os.remove(marker_path)
+
+    def _roll_forward(self, keys: List[str]) -> None:
+        for key in keys:
+            new_path = self._path(key) + self._NEW_SUFFIX
+            if os.path.exists(new_path):
+                os.replace(new_path, self._path(key))
+
+    def recover_pending_commit(self) -> bool:
+        """检查并处理上一次崩溃遗留的批量提交; 可重复调用(幂等)。
+
+        返回 True 表示发现并处理了遗留(前滚或清理), False 表示无事可做。
+        - 标记存在: 前滚——把剩余 .new 改名, 再删除标记;
+        - 标记不存在但有零散 .new: 崩溃在提交点之前, 旧状态完整, 删除 .new。
+        """
+        marker_path = os.path.join(self._state_dir, self._COMMIT_MARKER)
+        handled = False
+
+        stray_marker_tmp = marker_path + ".tmp"
+        if os.path.exists(stray_marker_tmp):
+            os.remove(stray_marker_tmp)
+            handled = True
+
+        if os.path.exists(marker_path):
+            try:
+                with open(marker_path, "r", encoding="utf-8") as fh:
+                    keys = list(json.load(fh)["keys"])
+            except Exception as exc:  # noqa: BLE001
+                raise StateCorruptedError(
+                    f"批量提交标记文件损坏, 无法判断上次提交的范围: {marker_path}; "
+                    f"请检查 .linc_work/state/ 目录, 不要直接删除后重跑。"
+                ) from exc
+            logger.warning("检测到上次未完成的批量提交, 正在前滚恢复: keys=%s", keys)
+            self._roll_forward([key for key in keys if key in self._FILES])
+            os.remove(marker_path)
+            handled = True
+
+        for key in self._FILES:
+            new_path = self._path(key) + self._NEW_SUFFIX
+            if os.path.exists(new_path):
+                logger.warning("清理提交点之前遗留的临时文件: %s", new_path)
+                os.remove(new_path)
+                handled = True
+        return handled
 
     def _load(self, key: str):
         path = self._path(key)

@@ -122,6 +122,67 @@ def test_append_merges_new_genome_into_existing_result(tmp_path):
     assert appended.join_result.cluster_counter >= first.join_result.cluster_counter
 
 
+class _CrashAfterFirstRenameRepository(FileRepository):
+    """模拟 append 落盘到一半崩溃(2026-11-26, 代码深度检查问题3): 批量提交
+    达成提交点后, 只让第一个键(genomes)改名生效就抛异常。"""
+
+    def _roll_forward(self, keys):
+        first = keys[0]
+        os.replace(self._path(first) + self._NEW_SUFFIX, self._path(first))
+        raise RuntimeError("simulated crash during commit phase two")
+
+
+def test_append_crash_mid_commit_is_recovered_by_resume_without_losing_new_genome(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    file_a = input_dir / "gA.faa"
+    _write_fasta(str(file_a), [("x", "MKV")])
+    state_dir = str(tmp_path / "state")
+
+    _make_pipeline(FileRepository(state_dir)).run([str(file_a)])
+
+    append_dir = tmp_path / "append"
+    append_dir.mkdir()
+    file_b = append_dir / "gB.faa"
+    _write_fasta(str(file_b), [("y", "MKL")])
+
+    crashing_repo = _CrashAfterFirstRenameRepository(state_dir)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        _make_pipeline(crashing_repo).append([str(file_b)])
+
+    # 崩溃后的磁盘上确实是新旧混杂: genomes 已含 gB, intra_results 仍是旧的。
+    raw = FileRepository(state_dir)
+    assert {g.source_file_name for g in raw.load_genomes().values()} == {"gA", "gB"}
+    assert len(raw.load_intra_results()) == 1
+
+    # resume() 开头会前滚未完成的批量提交, 因此拿到的是包含新基因组的完整结果。
+    resumed = _make_pipeline(FileRepository(state_dir)).resume([str(file_a)])
+
+    assert {g.source_file_name for g in resumed.genomes.values()} == {"gA", "gB"}
+    assert len(resumed.intra_results) == 2
+    healed = FileRepository(state_dir)
+    assert len(healed.load_intra_results()) == 2
+    assert {g.source_file_name for g in healed.load_genomes().values()} == {"gA", "gB"}
+
+
+def test_append_leaves_no_pending_commit_files_on_success(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    file_a = input_dir / "gA.faa"
+    _write_fasta(str(file_a), [("x", "MKV")])
+    state_dir = tmp_path / "state"
+
+    _make_pipeline(FileRepository(str(state_dir))).run([str(file_a)])
+    append_dir = tmp_path / "append"
+    append_dir.mkdir()
+    file_b = append_dir / "gB.faa"
+    _write_fasta(str(file_b), [("y", "MKL")])
+    _make_pipeline(FileRepository(str(state_dir))).append([str(file_b)])
+
+    assert not (state_dir / "commit_pending.json").exists()
+    assert list(state_dir.glob("*.new")) == []
+
+
 def test_append_cluster_ids_do_not_collide_with_historical_ones(tmp_path):
     input_dir = tmp_path / "genomes"
     input_dir.mkdir()

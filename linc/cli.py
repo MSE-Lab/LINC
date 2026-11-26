@@ -530,6 +530,15 @@ def run(
         state_dir = os.path.join(output_dir, ".linc_work", "state")
         repository = FileRepository(state_dir)
 
+        # 代码深度检查问题3(2026-11-26 与用户确认): 先处理上次 --append 崩溃遗留的
+        # 未完成批量提交(前滚或清理), 否则下面的 has_*()/签名检查会看到半成品状态。
+        try:
+            if repository.recover_pending_commit():
+                logger.warning("已恢复上次未完成的状态提交, 状态目录恢复一致")
+        except StateCorruptedError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+
         if resume or append_dir is not None:
             try:
                 historical_signature = repository.load_input_signature()

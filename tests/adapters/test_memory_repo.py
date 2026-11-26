@@ -122,3 +122,30 @@ def test_config_save_is_deep_copied_not_aliased():
     repo.save_config(config)
     config["cutoff_i"] = 0.9
     assert repo.load_config()["cutoff_i"] == 0.5
+
+
+def test_commit_state_batch_saves_all_entries():
+    repo = MemoryRepository()
+    repo.commit_state_batch(
+        {
+            "genomes": {"g1": Genome(genome_id="g1", file_path="g1.faa")},
+            "join_result": IncrementalResult(cluster_counter=3),
+            "config": {"v": 1},
+        }
+    )
+    assert repo.has_genomes() and repo.has_join_result()
+    assert repo.load_join_result().cluster_counter == 3
+    assert repo.load_config() == {"v": 1}
+
+
+def test_commit_state_batch_unknown_key_saves_nothing():
+    import pytest
+
+    repo = MemoryRepository()
+    with pytest.raises(KeyError):
+        repo.commit_state_batch({"config": {"v": 1}, "bogus": 1})
+    assert repo.load_config() is None
+
+
+def test_recover_pending_commit_is_noop():
+    assert MemoryRepository().recover_pending_commit() is False

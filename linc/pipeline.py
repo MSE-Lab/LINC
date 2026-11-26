@@ -433,6 +433,8 @@ class Pipeline:
         2026-10-03 与用户确认; force 风险修复, 2026-10-03 与用户再次确认)。
         """
         repo = self._repository
+        # 代码深度检查问题3(2026-11-26): 先处理上次 append 崩溃遗留的未完成批量提交。
+        repo.recover_pending_commit()
         forced_override = self._check_config_consistency(force=force, action="resume")
 
         if repo.has_genomes():
@@ -517,6 +519,8 @@ class Pipeline:
         修复, 2026-10-03 与用户再次确认)。
         """
         repo = self._repository
+        # 代码深度检查问题3(2026-11-26): 先处理上次 append 崩溃遗留的未完成批量提交。
+        repo.recover_pending_commit()
         forced_override = self._check_config_consistency(force=force, action="append")
 
         historical_genomes = repo.load_genomes()
@@ -574,11 +578,22 @@ class Pipeline:
         # 注意: `-i` 对应的 input_signature 不随 append 变化(`-i` 始终代表
         # 历史基础数据集, 只有 `-a` 每次追加的新目录才变化, 2026-10-02 与
         # 用户确认), 因此这里不更新 input_signature, 只更新实际的 Stage 产出。
-        repo.save_genomes(merged_genomes)
-        repo.save_intra_results(merged_intra_results)
-        repo.save_join_result(join_result)
-        repo.save_complete_ssn(complete_ssn)
-        repo.save_families(families)
+        #
+        # 代码深度检查问题3(2026-11-26 与用户确认): 五个 Stage 产出与 config 并入
+        # 同一次两阶段原子提交, 中途崩溃时要么整批生效、要么整批不生效(下次启动
+        # 由 recover_pending_commit() 前滚或清理), 不会出现 genomes 已含新基因组
+        # 而 intra/join 仍是旧的混杂状态。config 同生共死, 取代原先"config 最后
+        # 单独保存"的做法。
+        repo.commit_state_batch(
+            {
+                "genomes": merged_genomes,
+                "intra_results": merged_intra_results,
+                "join_result": join_result,
+                "complete_ssn": complete_ssn,
+                "families": families,
+                "config": asdict(self._config),
+            }
+        )
 
         # 数据管理优化第1项(2026-10-03 与用户确认): append 审计轨迹——记录
         # 本次追加的原始文件/目录、实际新增的 genome_id 列表。
@@ -593,11 +608,6 @@ class Pipeline:
                 "skipped_genome_ids": [],
             }
         )
-
-        # 工程审查问题1(2026-10-03 与用户确认; 2026-10-03 再次确认挪到末尾):
-        # 待全部 Stage 产出都已成功落盘后才保存本次参数, 避免中途崩溃导致
-        # config.pkl 与实际落盘的 Stage 结果不一致。
-        repo.save_config(asdict(self._config))
 
         return PipelineResult(
             genomes=merged_genomes,

@@ -120,3 +120,18 @@ class RepositoryPort(Protocol):
         """加载历史保存的算法参数字典, 不存在则返回 None(兼容本次改动之前
         写入的旧版 state, 此时跳过参数一致性校验并给出 warning)。"""
         ...
+
+    def commit_state_batch(self, entries: Dict[str, Any]) -> None:
+        """把多个状态对象作为一个整体原子提交(代码深度检查问题3, 2026-11-26
+        与用户确认): 要么全部生效, 要么全部不生效, 不会出现新旧混杂。
+
+        `entries` 的键为状态键: genomes / intra_results / join_result /
+        complete_ssn / families / input_signature / config, 值为对应对象
+        (与各 `save_*` 方法接受的类型一致)。FileRepository 以两阶段提交
+        实现; MemoryRepository 无崩溃场景, 直接逐个保存。"""
+        ...
+
+    def recover_pending_commit(self) -> bool:
+        """处理上一次崩溃遗留的未完成批量提交(前滚或清理), 幂等, 可重复调用。
+        返回 True 表示发现并处理了遗留, False 表示无事可做。"""
+        ...
