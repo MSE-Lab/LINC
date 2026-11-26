@@ -5,6 +5,7 @@ import pytest
 
 from linc.core.entities import GenomeStatus
 from linc.engine.genome_load_stage import (
+    DuplicateSequenceIdError,
     GenomeIdConflictError,
     GenomeLoadStage,
     build_input_signature,
@@ -67,16 +68,106 @@ def test_original_header_preserved_on_gene(tmp_path):
     assert [g.original_header for g in genome.genes] == ["protXYZ", "protABC"]
 
 
-def test_duplicate_original_header_logs_warning_but_not_fail(tmp_path, caplog):
+def test_duplicate_original_header_within_genome_raises(tmp_path):
+    # 2026-11-26 与用户确认: 基因组内重复的序列 ID 不再仅 warning, 而是中断。
     file_path = tmp_path / "dup.faa"
     _write_fasta(str(file_path), [("same", "MK"), ("same", "MKL")])
 
     stage = GenomeLoadStage()
-    result = stage.run([str(file_path)])
-    genome = result["G00001"]
+    with pytest.raises(DuplicateSequenceIdError) as exc_info:
+        stage.run([str(file_path)])
 
-    assert genome.status == GenomeStatus.LOADED
-    assert [g.original_header for g in genome.genes] == ["same", "same"]
+    assert list(exc_info.value.duplicates) == ["same"]
+    assert exc_info.value.duplicates["same"] == ["dup", "dup"]
+    assert "same" in str(exc_info.value)
+
+
+def test_duplicate_id_judged_by_first_token_before_whitespace(tmp_path):
+    # 重复判定按 header 第一个空白前的 token: 描述不同也算重复。
+    file_path = tmp_path / "dup.faa"
+    _write_fasta(
+        str(file_path),
+        [("gene1 hypothetical protein", "MK"), ("gene1 transposase", "MKL")],
+    )
+
+    with pytest.raises(DuplicateSequenceIdError) as exc_info:
+        GenomeLoadStage().run([str(file_path)])
+
+    assert "gene1" in exc_info.value.duplicates
+
+
+def test_duplicate_original_header_across_genomes_raises(tmp_path):
+    path_a = tmp_path / "a.faa"
+    path_b = tmp_path / "b.faa"
+    _write_fasta(str(path_a), [("gene1", "MK"), ("gene2", "MKL")])
+    _write_fasta(str(path_b), [("gene1", "MKV")])
+
+    with pytest.raises(DuplicateSequenceIdError) as exc_info:
+        GenomeLoadStage().run([str(path_a), str(path_b)])
+
+    assert exc_info.value.duplicates == {"gene1": ["a", "b"]}
+
+
+def test_distinct_ids_across_and_within_genomes_pass(tmp_path):
+    path_a = tmp_path / "a.faa"
+    path_b = tmp_path / "b.faa"
+    _write_fasta(str(path_a), [("a|gene1", "MK"), ("a|gene2", "MKL")])
+    _write_fasta(str(path_b), [("b|gene1", "MKV")])
+
+    result = GenomeLoadStage().run([str(path_a), str(path_b)])
+
+    assert set(result) == {"G00001", "G00002"}
+
+
+def test_duplicate_with_existing_genome_raises_on_append(tmp_path):
+    from linc.core.entities import Gene, Genome
+
+    new_path = tmp_path / "genome02.faa"
+    _write_fasta(str(new_path), [("gene1", "MK")])
+    historical = {
+        "G00001": Genome(
+            genome_id="G00001",
+            file_path="hist.faa",
+            source_file_name="genome01",
+            genes=[
+                Gene(
+                    gene_id="G00001|1", genome_id="G00001", length=2,
+                    original_header="gene1",
+                )
+            ],
+            status=GenomeStatus.LOADED,
+        )
+    }
+
+    with pytest.raises(DuplicateSequenceIdError) as exc_info:
+        GenomeLoadStage().run([str(new_path)], existing_genomes=historical)
+
+    assert exc_info.value.duplicates == {"gene1": ["genome01[历史]", "genome02"]}
+
+
+def test_empty_header_raises(tmp_path):
+    file_path = tmp_path / "empty_header.faa"
+    file_path.write_text(">\nMKV\n>g2\nMK\n", encoding="utf-8")
+
+    with pytest.raises(DuplicateSequenceIdError) as exc_info:
+        GenomeLoadStage().run([str(file_path)])
+
+    assert exc_info.value.duplicates == {}
+    assert exc_info.value.empty_headers == ["empty_header: 第 1 条记录"]
+
+
+def test_duplicate_error_message_truncates_long_lists(tmp_path):
+    file_path = tmp_path / "many_dup.faa"
+    records = []
+    for i in range(15):
+        records.extend([(f"id{i}", "MK"), (f"id{i}", "MKL")])
+    _write_fasta(str(file_path), records)
+
+    with pytest.raises(DuplicateSequenceIdError) as exc_info:
+        GenomeLoadStage().run([str(file_path)])
+
+    assert len(exc_info.value.duplicates) == 15
+    assert "另有 5 个重复 ID 未列出" in str(exc_info.value)
 
 
 def test_gene_length_and_sequence_match_fasta_body(tmp_path):
@@ -109,8 +200,8 @@ def test_genome_id_is_internal_code_not_filename(tmp_path):
 def test_multiple_genomes_get_sequential_codes_sorted_by_filename(tmp_path):
     path_b = tmp_path / "b.faa"
     path_a = tmp_path / "a.faa"
-    _write_fasta(str(path_a), [("g1", "MK")])
-    _write_fasta(str(path_b), [("g1", "MK")])
+    _write_fasta(str(path_a), [("a1", "MK")])
+    _write_fasta(str(path_b), [("b1", "MK")])
 
     stage = GenomeLoadStage()
     # 故意乱序传入, 编号分配应与传入顺序无关, 按文件名排序后分配
@@ -239,8 +330,8 @@ def test_no_conflict_when_filenames_are_distinct(tmp_path):
     # 对照: 文件名 stem 不同时不应触发冲突检测, run() 正常返回。
     foo_path = tmp_path / "foo.faa"
     bar_path = tmp_path / "bar.faa"
-    _write_fasta(str(foo_path), [("g1", "MK")])
-    _write_fasta(str(bar_path), [("g1", "MK")])
+    _write_fasta(str(foo_path), [("foo1", "MK")])
+    _write_fasta(str(bar_path), [("bar1", "MK")])
 
     stage = GenomeLoadStage()
     result = stage.run([str(foo_path), str(bar_path)])

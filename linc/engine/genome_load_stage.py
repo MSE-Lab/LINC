@@ -12,6 +12,10 @@
     3. 若多个文件解析出相同的 genome_id(文件名 stem 相同, 如 foo.fa 与
        foo.faa), 则视为无法自行消歧的歧义, 直接抛出 GenomeIdConflictError
        中断整个流程, 要求用户手动解决目录中的文件冲突后重新运行。
+    4. 序列 ID(header 第一个空白前的 token)必须在基因组内、跨基因组(含 --append
+       时与历史基因组)全局唯一, 且不允许空 header; 否则抛出
+       DuplicateSequenceIdError 中断整个流程(2026-11-26 与用户确认, 取代原先
+       基因组内重复仅 warning + 回填时加 #序号 消歧的做法)。
 
 不引入 biopython 等第三方依赖,使用标准库手写一个极简 FASTA 解析器。
 """
@@ -43,6 +47,50 @@ class GenomeIdConflictError(ValueError):
             f"{genome_id} -> {paths}" for genome_id, paths in conflicts.items()
         )
         super().__init__(f"检测到重名的 genome_id, 已中断加载: {detail}")
+
+
+_MAX_REPORTED_ID_ISSUES = 10
+
+
+class DuplicateSequenceIdError(ValueError):
+    """序列 ID(header 第一个空白前的 token)重复或为空。
+
+    LINC 要求序列 ID 在基因组内、跨基因组(含 --append 时与历史基因组)
+    全局唯一, 否则 Orthogroups.txt / gene_genome.tsv / linc pan 无法无歧义地
+    把序列 ID 对应回所属基因组。程序不自行消歧, 直接中断, 要求用户修正输入
+    (例如给 header 加上基因组前缀)后重新运行(2026-11-26 与用户确认)。
+
+    Attributes:
+        duplicates: 重复 ID -> 出现位置列表(基因组文件名; 同一基因组内重复
+            时该基因组名会出现多次; 来自历史基因组的位置带 "[历史]" 标记)。
+        empty_headers: 空 header 记录的位置描述列表。
+    """
+
+    def __init__(
+        self,
+        duplicates: Dict[str, List[str]],
+        empty_headers: List[str],
+    ) -> None:
+        self.duplicates = duplicates
+        self.empty_headers = empty_headers
+        parts: List[str] = []
+        if duplicates:
+            shown = list(duplicates.items())[:_MAX_REPORTED_ID_ISSUES]
+            detail = "; ".join(f"{seq_id} -> {locs}" for seq_id, locs in shown)
+            more = len(duplicates) - len(shown)
+            suffix = f" ...(另有 {more} 个重复 ID 未列出)" if more > 0 else ""
+            parts.append(f"共 {len(duplicates)} 个重复的序列 ID: {detail}{suffix}")
+        if empty_headers:
+            shown_empty = empty_headers[:_MAX_REPORTED_ID_ISSUES]
+            more = len(empty_headers) - len(shown_empty)
+            suffix = f" ...(另有 {more} 处未列出)" if more > 0 else ""
+            parts.append(
+                f"共 {len(empty_headers)} 条记录的 header 为空: {shown_empty}{suffix}"
+            )
+        super().__init__(
+            "序列 ID 校验失败, 已中断加载(基因组内与跨基因组的序列 ID 均须唯一且非空, "
+            "建议给 header 加上基因组前缀, 如 '>基因组名|基因ID'): " + "; ".join(parts)
+        )
 
 
 def discover_fasta_files(directory: str) -> List[str]:
@@ -152,6 +200,10 @@ class GenomeLoadStage:
         序号(从 1 开始); 原始 FASTA header 保存在 `Gene.original_header`,
         用于最终结果回填为用户可读的原始 ID。
 
+        全部基因组解析完成后, 校验 original_header 在基因组内、跨基因组
+        (含 `existing_genomes` 中的历史基因组)均唯一且非空, 否则抛出
+        DuplicateSequenceIdError(2026-11-26 与用户确认)。
+
         `existing_genomes`(2026-10-02, 第8步 `--append` 设计; 2026-10-03
         为配合 genome_id 短编号化改为传入完整的历史 genomes 字典): 若传入,
         表示历史(此前已完整运行过)的 genome_id -> Genome 映射。本次用于:
@@ -174,8 +226,51 @@ class GenomeLoadStage:
             next_code_num += 1
             genome = self._load_single_genome(genome_id, source_file_name, file_path)
             result[genome_id] = genome
+        self._check_sequence_id_uniqueness(result, existing_genomes)
         self._log_summary(result)
         return result
+
+    @staticmethod
+    def _check_sequence_id_uniqueness(
+        new_genomes: Dict[str, Genome],
+        existing_genomes: Dict[str, Genome],
+    ) -> None:
+        """校验序列 ID(original_header)唯一且非空, 违反即中断。
+
+        覆盖三类冲突: 同一基因组内重复、跨基因组重复、与历史基因组重复
+        (--append)。历史基因组自身不重新校验(只作为对照集合)。
+        """
+        first_seen: Dict[str, str] = {}
+        for genome in existing_genomes.values():
+            if genome.status != GenomeStatus.LOADED:
+                continue
+            label = f"{genome.source_file_name}[历史]"
+            for gene in genome.genes:
+                if gene.original_header is not None:
+                    first_seen.setdefault(gene.original_header, label)
+
+        duplicates: Dict[str, List[str]] = {}
+        empty_headers: List[str] = []
+        for genome in new_genomes.values():
+            if genome.status != GenomeStatus.LOADED:
+                continue
+            name = genome.source_file_name
+            for gene in genome.genes:
+                header = gene.original_header
+                if header is None:
+                    local_id = gene.gene_id.rsplit("|", 1)[-1]
+                    empty_headers.append(f"{name}: 第 {local_id} 条记录")
+                elif header in first_seen:
+                    duplicates.setdefault(header, [first_seen[header]]).append(name)
+                else:
+                    first_seen[header] = name
+
+        if duplicates or empty_headers:
+            logger.error(
+                "序列 ID 校验失败: 重复 ID %d 个, 空 header %d 条, 中断加载",
+                len(duplicates), len(empty_headers),
+            )
+            raise DuplicateSequenceIdError(duplicates, empty_headers)
 
     @staticmethod
     def _format_genome_code(num: int) -> str:
@@ -283,14 +378,6 @@ class GenomeLoadStage:
                 source_file_name=source_file_name,
                 genes=[],
                 status=GenomeStatus.FAILED,
-            )
-
-        headers_seen = [g.original_header for g in genes if g.original_header is not None]
-        if len(headers_seen) != len(set(headers_seen)):
-            logger.warning(
-                "基因组文件内存在重复的原始序列 ID(original_header), "
-                "回填 Orthogroups.txt 时将自动加 #序号 消歧: genome_id=%s file_path=%s",
-                genome_id, file_path,
             )
 
         return Genome(

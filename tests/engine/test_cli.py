@@ -913,3 +913,55 @@ def test_run_append_with_different_inflation_exits_with_error(tmp_path):
     )
     assert result.exit_code != 0
     assert "inflation" in result.stdout or "inflation" in (result.stderr or "")
+
+
+# ---- 序列 ID 唯一性校验(2026-11-26 与用户确认): 重复/空 ID 即中断 ----
+
+def test_run_duplicate_sequence_id_across_genomes_exits_with_error(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("gene1", "MKV")])
+    _write_fasta(str(input_dir / "genome02.faa"), [("gene1", "MKL")])
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(app, ["run", "-i", str(input_dir), "-o", str(output_dir)])
+
+    assert result.exit_code == 1
+    message = result.stdout + (result.stderr or "")
+    assert "gene1" in message
+    assert not (output_dir / "Orthogroups.txt").exists()
+
+
+def test_run_duplicate_sequence_id_within_genome_exits_with_error(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("gene1 a", "MKV"), ("gene1 b", "MKL")])
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(app, ["run", "-i", str(input_dir), "-o", str(output_dir)])
+
+    assert result.exit_code == 1
+    assert "gene1" in result.stdout + (result.stderr or "")
+
+
+def test_run_append_duplicate_sequence_id_with_history_exits_with_error(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("gene1", "MKV")])
+    output_dir = tmp_path / "out"
+
+    first = runner.invoke(app, ["run", "-i", str(input_dir), "-o", str(output_dir)])
+    assert first.exit_code == 0
+
+    append_dir = tmp_path / "append"
+    append_dir.mkdir()
+    _write_fasta(str(append_dir / "genome02.faa"), [("gene1", "MKL")])
+
+    result = runner.invoke(
+        app, ["run", "-i", str(input_dir), "-o", str(output_dir), "-a", str(append_dir)],
+    )
+
+    assert result.exit_code == 1
+    assert "gene1" in result.stdout + (result.stderr or "")
+    load_summary = json.loads((output_dir / "load_summary.json").read_text(encoding="utf-8"))
+    assert load_summary["total_genomes"] == 1

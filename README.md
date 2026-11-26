@@ -101,7 +101,9 @@ linc --help
 
 ### 1. Run Protein Family Clustering (`linc run`)
 
-Given a directory of protein FASTA files (`.fa`, `.fasta`, `.faa`):
+Given a directory of protein FASTA files (`.fa`, `.fasta`, `.faa`).
+
+> **Input convention:** the sequence ID (the token of the FASTA header before the first whitespace) must be **unique both within each genome and across all genomes** (including previously processed genomes when using `-a/--append`), and must not be empty. Otherwise `linc run` aborts at the first stage and lists the offending IDs. Prefixing the header with the genome name (e.g. `>GCA_000005845.2|ORF_00001 ...`) is the recommended way to guarantee this.
 
 ```bash
 # Standard run using MMseqs2 backend

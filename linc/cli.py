@@ -39,6 +39,7 @@ from .core.entities import (
     GenomeStatus,
 )
 from .engine.genome_load_stage import (
+    DuplicateSequenceIdError,
     GenomeIdConflictError,
     build_input_signature,
     discover_fasta_files,
@@ -179,20 +180,16 @@ def _build_gene_id_to_original(genomes: dict) -> dict:
     内部 gene_id("{genome_id}|{local_id}")回填为用户可识别的原始 ID
     (2026-10-03 与用户确认"方案B": 原始 ID 不再因内部重编码而丢失)。
 
-    同一基因组内若存在重复的 original_header, 按出现顺序加 "#2"/"#3"...
-    后缀消歧, 保证映射后的值仍然全局唯一(与 GenomeLoadStage 解析阶段的
-    重复 warning 配套)。若 original_header 缺失(理论上不应出现, 除非解析
-    异常), 回退使用内部 gene_id 本身, 避免丢失成员。
+    original_header 的全局唯一性(基因组内与跨基因组)已由 GenomeLoadStage 在
+    加载阶段强制校验(重复即中断, 2026-11-26 与用户确认, 取代此前的 "#N"
+    消歧), 因此这里直接取 original_header, 与 gene_genome.tsv、linc pan
+    的口径天然一致。若 original_header 缺失(旧版 state 或解析异常), 回退使用
+    内部 gene_id 本身, 避免丢失成员。
     """
     mapping: dict = {}
     for genome in genomes.values():
-        seen_count: dict = {}
         for gene in genome.genes:
-            header = gene.original_header or gene.gene_id
-            seen_count[header] = seen_count.get(header, 0) + 1
-            if seen_count[header] > 1:
-                header = f"{header}#{seen_count[header]}"
-            mapping[gene.gene_id] = header
+            mapping[gene.gene_id] = gene.original_header or gene.gene_id
     return mapping
 
 
@@ -648,7 +645,7 @@ def run(
             else:
                 logger.info("开始加载基因组, 共发现 %d 个候选文件", len(genome_files))
                 result = pipeline.run(genome_files)
-        except GenomeIdConflictError as exc:
+        except (GenomeIdConflictError, DuplicateSequenceIdError) as exc:
             typer.secho(str(exc), fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
         except (StateCorruptedError, IndexMissingError, ConfigMismatchError) as exc:
