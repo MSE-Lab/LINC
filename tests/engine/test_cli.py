@@ -965,3 +965,100 @@ def test_run_append_duplicate_sequence_id_with_history_exits_with_error(tmp_path
     assert "gene1" in result.stdout + (result.stderr or "")
     load_summary = json.loads((output_dir / "load_summary.json").read_text(encoding="utf-8"))
     assert load_summary["total_genomes"] == 1
+
+
+# ---- 已有历史状态时拒绝无标志重跑(2026-11-26 与用户确认, --force 语义不变) ----
+
+def _first_run(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV"), ("g2", "MKL")])
+    output_dir = tmp_path / "out"
+    first = runner.invoke(app, ["run", "-i", str(input_dir), "-o", str(output_dir)])
+    assert first.exit_code == 0
+    return input_dir, output_dir
+
+
+def test_run_without_resume_or_append_on_existing_state_exits_with_error(tmp_path):
+    input_dir, output_dir = _first_run(tmp_path)
+    before = (output_dir / "load_summary.json").read_text(encoding="utf-8")
+
+    # 换一批不同的输入, 仍指向同一个 -o: 必须拒绝, 且不得改动旧结果。
+    other_input_dir = tmp_path / "genomes2"
+    other_input_dir.mkdir()
+    _write_fasta(str(other_input_dir / "other01.faa"), [("x1", "MKVLAQW")])
+
+    result = runner.invoke(
+        app, ["run", "-i", str(other_input_dir), "-o", str(output_dir)]
+    )
+
+    assert result.exit_code == 1
+    message = result.stdout + (result.stderr or "")
+    assert "--resume" in message
+    assert "-a/--append" in message
+    assert (output_dir / "load_summary.json").read_text(encoding="utf-8") == before
+
+
+def test_run_with_force_but_without_resume_on_existing_state_is_still_rejected(tmp_path):
+    input_dir, output_dir = _first_run(tmp_path)
+
+    result = runner.invoke(
+        app, ["run", "-i", str(input_dir), "-o", str(output_dir), "--force"]
+    )
+
+    assert result.exit_code == 1
+    assert "--resume" in result.stdout + (result.stderr or "")
+
+
+def test_run_rejects_when_only_input_signature_remains(tmp_path):
+    input_dir, output_dir = _first_run(tmp_path)
+    state_dir = output_dir / ".linc_work" / "state"
+    for name in ("genomes", "intra_results", "join_result", "complete_ssn", "families"):
+        (state_dir / f"{name}.pkl").unlink()
+    assert (state_dir / "input_signature.pkl").exists()
+
+    result = runner.invoke(app, ["run", "-i", str(input_dir), "-o", str(output_dir)])
+
+    assert result.exit_code == 1
+    assert "input_signature" in result.stdout + (result.stderr or "")
+
+
+def test_run_rejects_when_only_a_stage_output_remains(tmp_path):
+    input_dir, output_dir = _first_run(tmp_path)
+    state_dir = output_dir / ".linc_work" / "state"
+    (state_dir / "input_signature.pkl").unlink()
+
+    result = runner.invoke(app, ["run", "-i", str(input_dir), "-o", str(output_dir)])
+
+    assert result.exit_code == 1
+    assert "genomes" in result.stdout + (result.stderr or "")
+
+
+def test_run_on_output_dir_without_prior_state_runs_normally(tmp_path):
+    input_dir = tmp_path / "genomes"
+    input_dir.mkdir()
+    _write_fasta(str(input_dir / "genome01.faa"), [("g1", "MKV")])
+    output_dir = tmp_path / "out"
+    # -o 目录已存在、甚至已有 .linc_work, 但没有任何 state 产出: 视为全新运行。
+    (output_dir / ".linc_work").mkdir(parents=True)
+
+    result = runner.invoke(app, ["run", "-i", str(input_dir), "-o", str(output_dir)])
+
+    assert result.exit_code == 0
+
+
+def test_run_resume_and_append_are_not_blocked_by_existing_state_check(tmp_path):
+    input_dir, output_dir = _first_run(tmp_path)
+
+    resumed = runner.invoke(
+        app, ["run", "-i", str(input_dir), "-o", str(output_dir), "--resume"]
+    )
+    assert resumed.exit_code == 0
+
+    append_dir = tmp_path / "append"
+    append_dir.mkdir()
+    _write_fasta(str(append_dir / "genome02.faa"), [("g3", "MKV")])
+    appended = runner.invoke(
+        app, ["run", "-i", str(input_dir), "-o", str(output_dir), "-a", str(append_dir)]
+    )
+    assert appended.exit_code == 0

@@ -113,6 +113,8 @@ linc run -i /path/to/genomes -o output/ --aligner mmseqs --threads 8
 linc run -i /path/to/genomes -o output_diamond/ --aligner diamond --threads 8
 ```
 
+> **Output directory convention:** if `-o` already contains a previous run (`.linc_work/state`), a plain `linc run` (without `--resume` or `-a/--append`) is refused with an error, so old results and cached alignment indexes are never silently overwritten or reused. Use `--resume` to continue, `-a/--append` to add genomes, or clean `-o` / pick a new directory to start over (`--force` only relaxes the parameter-consistency check of `--resume`/`-a`; it does not discard existing state). Alignment indexes under `.linc_work` are additionally verified by a sha256 fingerprint of the sequences before reuse; on mismatch they are rebuilt with a warning.
+
 ### 2. Resume Interrupted Runs (`--resume`)
 
 If a run was stopped midway, resume from the last completed stage:

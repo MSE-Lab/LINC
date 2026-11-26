@@ -245,6 +245,31 @@ def _build_intra_summary(intra_results: dict) -> dict:
     }
 
 
+def _detect_existing_state(repository: FileRepository) -> List[str]:
+    """返回 `-o` 下已存在的历史状态项名称(空列表表示全新目录)。
+
+    判定标准(代码深度检查问题1, 2026-11-26 与用户确认): 有 `input_signature`,
+    或任一 Stage 产出(genomes/intra_results/join_result/complete_ssn/families)。
+    input_signature 文件损坏时同样视为"已有历史状态"(损坏文件本身就是历史遗留)。
+    """
+    found: List[str] = []
+    try:
+        if repository.load_input_signature() is not None:
+            found.append("input_signature")
+    except StateCorruptedError:
+        found.append("input_signature(已损坏)")
+    for name, has in (
+        ("genomes", repository.has_genomes()),
+        ("intra_results", repository.has_intra_results()),
+        ("join_result", repository.has_join_result()),
+        ("complete_ssn", repository.has_complete_ssn()),
+        ("families", repository.has_families()),
+    ):
+        if has:
+            found.append(name)
+    return found
+
+
 @app.command()
 def run(
     input_dir: str = typer.Option(
@@ -538,6 +563,23 @@ def run(
         except StateCorruptedError as exc:
             typer.secho(str(exc), fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
+
+        # 代码深度检查问题1(2026-11-26 与用户确认): -o 下已有历史状态、又不带
+        # --resume/-a 时拒绝运行。否则会逐 Stage 覆盖旧产出, 并复用 .linc_work 下
+        # 旧批次的比对索引; 中途崩溃还会留下新旧混杂的状态。--force 语义不变
+        # (仅在 --resume/-a 时生效), 想从头重跑请清理 -o 或换新目录。
+        if not resume and append_dir is None:
+            existing_state = _detect_existing_state(repository)
+            if existing_state:
+                typer.secho(
+                    f"-o {output_dir} 下已存在历史运行状态(.linc_work/state: "
+                    f"{', '.join(existing_state)}), 但本次未指定 --resume 或 -a/--append。"
+                    "为避免覆盖旧结果或复用旧批次的比对索引, 已中止运行。"
+                    "请选择: (1) 加 --resume 续跑上次运行; (2) 加 -a/--append 追加新基因组; "
+                    "(3) 清理该 -o 目录, 或换一个新的输出目录后重新运行。",
+                    fg=typer.colors.RED, err=True,
+                )
+                raise typer.Exit(code=1)
 
         if resume or append_dir is not None:
             try:

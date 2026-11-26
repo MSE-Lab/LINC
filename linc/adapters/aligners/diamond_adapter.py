@@ -15,6 +15,7 @@
   显式传入 `--max-target-seqs`, 默认 100000, 与 mmseqs 的
   `MMseqsConfig.max_seqs` 口径对齐(2026-11-26 与用户确认, 不提供 CLI 选项)。
 """
+import hashlib
 import logging
 import os
 import shutil
@@ -22,11 +23,40 @@ import subprocess
 import tempfile
 import uuid
 from dataclasses import dataclass
-from typing import Any, List, Optional, Sequence
+from typing import Any, Iterator, List, Optional, Sequence
 
 from ...core.entities import AlignmentResult, Gene
 
 logger = logging.getLogger(__name__)
+
+
+def _iter_fasta_records(genes: Sequence[Gene]) -> Iterator[str]:
+    """按 `_write_fasta` 的落盘格式逐条产出 FASTA 记录文本。
+
+    写盘与指纹计算共用本函数, 保证"比对的内容"与"实际写入的内容"逐字节一致
+    (索引复用前的 sha256 指纹比对, 2026-11-26 与用户确认, 与 mmseqs_adapter 对称)。
+    """
+    for gene in genes:
+        sequence = gene.sequence or ""
+        yield f">{gene.gene_id}\n{sequence}\n"
+
+
+def _genes_fasta_sha256(genes: Sequence[Gene]) -> str:
+    """流式计算 genes 按 `_write_fasta` 格式写盘后的 sha256(不实际写盘)。"""
+    digest = hashlib.sha256()
+    for record in _iter_fasta_records(genes):
+        digest.update(record.encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _file_sha256(path: str) -> str:
+    """分块流式计算文件的 sha256。"""
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
 
 # diamond --outfmt 6 自定义列顺序, 与 AlignmentResult 字段逐一对应
 # (pident 为百分数, qcovhsp/scovhsp 为百分数, 需与 mmseqs 侧保持同口径)。
@@ -72,9 +102,8 @@ class DiamondAligner:
     @staticmethod
     def _write_fasta(genes: Sequence[Gene], path: str) -> None:
         with open(path, "w", encoding="utf-8") as fh:
-            for gene in genes:
-                sequence = gene.sequence or ""
-                fh.write(f">{gene.gene_id}\n{sequence}\n")
+            for record in _iter_fasta_records(genes):
+                fh.write(record)
 
     def _sensitivity_flag(self) -> str:
         return f"--{self._config.sensitivity}"
@@ -206,6 +235,14 @@ class DiamondAligner:
         直接复用返回现有路径, 不重新执行 makedb——避免 `--force` 全量重算
         等场景下对序列未变、仅算法参数变化的历史基因组做冗余建库, 同时减少
         一个本可避免的失败点(建库涉及文件写入与子进程调用)。
+
+        内容指纹校验(代码深度检查问题1, 2026-11-26 与用户确认): 索引目录以
+        index_id(如 genome_id)命名, 不含序列内容信息; 同一 work_dir 下换一批
+        输入重跑时, 新旧批次的同名 index_id 对应的是不同序列, 若直接复用会
+        静默基于旧序列比对。因此复用前先比较"本次序列"与索引目录里已落盘的
+        `genes.fasta` 的完整 sha256: 一致才复用; 不一致(或 genes.fasta 缺失)
+        则打 warning、清空整个索引目录(旧 DB 与旧 search_* 中间结果均已作废)
+        后重新建库。首次建库路径不做任何指纹计算。
         """
         if not genes:
             return None
@@ -215,7 +252,18 @@ class DiamondAligner:
         fasta_path = os.path.join(index_dir, "genes.fasta")
         db_path = os.path.join(index_dir, "db")
         if self.index_exists(db_path):
-            return db_path
+            if (
+                os.path.isfile(fasta_path)
+                and _file_sha256(fasta_path) == _genes_fasta_sha256(genes)
+            ):
+                return db_path
+            logger.warning(
+                "index_id=%s 的序列内容与已有索引不一致(或索引目录缺少 genes.fasta), "
+                "已清空旧索引目录并重建: %s",
+                index_id, index_dir,
+            )
+            shutil.rmtree(index_dir)
+            os.makedirs(index_dir, exist_ok=True)
         self._write_fasta(genes, fasta_path)
         cmd = ["diamond", "makedb", "--in", fasta_path, "-d", db_path]
         logger.debug("调用 diamond: %s", " ".join(cmd))

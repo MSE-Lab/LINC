@@ -3,6 +3,7 @@
 通过 monkeypatch 替换 shutil.which/subprocess.run, 不依赖真实安装的 mmseqs2
 二进制程序, 可在任意环境下运行(包括未安装 mmseqs 的 CI)。
 """
+import logging
 import os
 import subprocess
 
@@ -279,16 +280,111 @@ def test_build_index_reuses_existing_index_without_calling_subprocess(monkeypatc
 
     work_dir = _tmp_work_dir(tmp_path)
     aligner = MMseqsAligner(MMseqsConfig(work_dir=work_dir))
-    index_dir = os.path.join(work_dir, "genome_x")
+    # 2026-11-26(代码深度检查问题1): 复用前会比对 genes.fasta 的 sha256, 因此
+    # 已有索引目录里必须带有与本次序列内容一致的 genes.fasta。
+    _, db_path = _seed_existing_index(work_dir, "genome_x", [_gene("g1|1", 100)])
+
+    index = aligner.build_index([_gene("g1|1", 100)], index_id="genome_x")
+    assert index == db_path
+
+
+def _seed_existing_index(work_dir, index_id, genes, write_fasta=True):
+    """在 work_dir 下造一个"已存在"的假 mmseqs 索引目录。"""
+    index_dir = os.path.join(work_dir, index_id)
     os.makedirs(index_dir, exist_ok=True)
     db_path = os.path.join(index_dir, "db")
     with open(db_path, "w", encoding="utf-8") as fh:
         fh.write("fake db")
     with open(f"{db_path}.dbtype", "w", encoding="utf-8") as fh:
         fh.write("fake dbtype")
+    if write_fasta:
+        MMseqsAligner._write_fasta(genes, os.path.join(index_dir, "genes.fasta"))
+    return index_dir, db_path
 
-    index = aligner.build_index([_gene("g1|1", 100)], index_id="genome_x")
-    assert index == db_path
+
+def test_build_index_rebuilds_when_sequence_content_differs(monkeypatch, tmp_path, caplog):
+    """同一 index_id、序列内容不同(换输入重跑): 必须清空旧索引目录并重建,
+    旧的 search_* 中间结果一并清掉, 并打 warning, 不中断。"""
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
+    calls = []
+
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    work_dir = _tmp_work_dir(tmp_path)
+    old_genes = [_gene("G00001|1", 100)]
+    index_dir, _ = _seed_existing_index(work_dir, "G00001", old_genes)
+    stale_search = os.path.join(index_dir, "search_intra_self")
+    os.makedirs(stale_search)
+    with open(os.path.join(stale_search, "result.tsv"), "w", encoding="utf-8") as fh:
+        fh.write("stale")
+
+    new_genes = [_gene("G00001|1", 50)]
+    aligner = MMseqsAligner(MMseqsConfig(work_dir=work_dir))
+    with caplog.at_level(logging.WARNING):
+        index = aligner.build_index(new_genes, index_id="G00001")
+
+    assert [c[1] for c in calls] == ["createdb"]
+    assert index == os.path.join(index_dir, "db")
+    with open(os.path.join(index_dir, "genes.fasta"), encoding="utf-8") as fh:
+        assert fh.read() == ">G00001|1\n" + "M" * 50 + "\n"
+    assert not os.path.exists(stale_search)
+    assert "G00001" in caplog.text and "已清空旧索引目录并重建" in caplog.text
+
+
+def test_build_index_rebuilds_when_genes_fasta_missing(monkeypatch, tmp_path):
+    """索引文件在、但 genes.fasta 缺失(无法校验内容): 视为不一致, 重建。"""
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
+    calls = []
+
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    work_dir = _tmp_work_dir(tmp_path)
+    genes = [_gene("g1|1", 100)]
+    index_dir, _ = _seed_existing_index(work_dir, "genome_x", genes, write_fasta=False)
+
+    aligner = MMseqsAligner(MMseqsConfig(work_dir=work_dir))
+    aligner.build_index(genes, index_id="genome_x")
+
+    assert [c[1] for c in calls] == ["createdb"]
+    assert os.path.isfile(os.path.join(index_dir, "genes.fasta"))
+
+
+def test_build_index_reuses_after_build_and_rebuilds_only_on_change(monkeypatch, tmp_path):
+    """端到端: 首次建库 -> 相同序列再调用复用(不再 createdb) -> 序列变化重建。"""
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/mmseqs")
+    calls = []
+
+    def _fake_run(cmd, check, capture_output, text, **kwargs):
+        calls.append(cmd)
+        if cmd[1] == "createdb":
+            db_path = cmd[3]
+            with open(db_path, "w", encoding="utf-8") as fh:
+                fh.write("fake db")
+            with open(f"{db_path}.dbtype", "w", encoding="utf-8") as fh:
+                fh.write("fake dbtype")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    aligner = MMseqsAligner(MMseqsConfig(work_dir=_tmp_work_dir(tmp_path)))
+    genes = [_gene("g1|1", 100), _gene("g1|2", 80)]
+
+    first = aligner.build_index(genes, index_id="genome_x")
+    assert len(calls) == 1
+    second = aligner.build_index(list(genes), index_id="genome_x")
+    assert second == first
+    assert len(calls) == 1
+
+    aligner.build_index([_gene("g1|1", 100), _gene("g1|2", 81)], index_id="genome_x")
+    assert len(calls) == 2
 
 
 def test_build_index_empty_genes_returns_none_without_calling_subprocess(monkeypatch, tmp_path):
